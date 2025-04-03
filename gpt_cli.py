@@ -124,14 +124,30 @@ def extract_code_blocks(text):
     pattern = r"```(?:([\w+-]*)\n)?([\s\S]*?)```(?:\n|$)"
     return re.findall(pattern, text, re.DOTALL)
 
-
 def save_code_blocks(blocks):
     OUTPUT_DIR.mkdir(exist_ok=True)
     paths = []
 
+    # 언어명과 확장자 사이의 매핑을 정의
+    ext_mapping = {
+        "python": "py",
+        "javascript": "js",
+        "js": "js",
+        "text": "txt",
+        "html": "html",
+        "css": "css",
+        "java": "java",
+        "c": "c",
+        "cpp": "cpp",
+        "typescript": "ts",
+        "ts": "ts",
+        # 필요한 다른 언어도 추가 가능
+    }
+
     for i, (lang, code) in enumerate(blocks, 1):
-        ext = {"python": "py", "js": "js", "text": "txt"}.get(lang, lang)
-        
+        # 언어에 맞게 확장자 지정
+        ext = ext_mapping.get(lang, "txt")  # 기본 확장자는 "txt"
+
         # 파일 이름의 기본 포맷
         base_filename = f"gpt_output_{i}"
         path = OUTPUT_DIR / f"{base_filename}.{ext}"
@@ -148,7 +164,6 @@ def save_code_blocks(blocks):
         paths.append(path)
 
     return paths
-
 
 def save_markdown(content, filename="gpt_response.md"):
     MD_OUTPUT_DIR.mkdir(exist_ok=True)
@@ -212,14 +227,39 @@ def render_diff(a, b, lang="python"):
 
 def render_response(content, last=""):
     try:
+        # 코드 블록을 추출합니다.
         blocks_new = extract_code_blocks(content)
-
+        
+        # 코드 블록이 없는 경우 전체 텍스트를 출력합니다.
         if not blocks_new:
             console.print(content)
             return
 
+        # 각 코드 블록을 기준으로 일반 텍스트와 구분하여 출력
+        start_index = 0
         for i, (lang, code) in enumerate(blocks_new):
+            # 각 코드 블록의 전체 길이를 계산합니다.
+            code_block_str = f"```{lang}\n{code}```" if lang else f"```\n{code}```"
+            length_code_block = len(code_block_str)
+            
+            # 현재 코드 블록 직전의 텍스트 구간
+            end_index = content.find(code_block_str, start_index)
+
+            # 코드 블록 이전의 일반 텍스트 출력
+            if end_index > start_index:
+                console.print(content[start_index:end_index].strip())
+
+            if lang:
+                console.print(f"[bold cyan]Language: {lang}[/bold cyan]")
+            # 코드 블록 출력
             console.print(Syntax(code, lang or "text", theme="monokai", word_wrap=True))
+
+            # 다음 텍스트 시작 위치 갱신
+            start_index = end_index + length_code_block
+
+        # 마지막 코드 블록 다음의 텍스트가 있을 경우 출력
+        if start_index < len(content):
+            console.print(content[start_index:].strip())
 
     except Exception as e:
         console.print(f"[red]렌더링 중 오류 발생: {e}")
@@ -259,14 +299,16 @@ def chat_mode(session_name, copy_enabled=False):
             if msg == "/diffme":
                 for path in files:
                     original = read_code_file(path)
-                    for _, gpt_code in extract_code_blocks(last):
-                        render_diff(original, gpt_code)
+                    for lang, gpt_code in extract_code_blocks(last):
+                        render_diff(original, gpt_code, lang)
                 continue
             if msg == "/diffcode":
                 new_blocks = extract_code_blocks(last)
                 old_blocks = extract_code_blocks(session[-3]["content"]) if len(session) > 2 else []
                 for i in range(min(len(new_blocks), len(old_blocks))):
-                    render_diff(old_blocks[i][1], new_blocks[i][1])
+                    lang_new, new_code = new_blocks[i]
+                    lang_old, old_code = old_blocks[i]
+                    render_diff(old_blocks[i][1], new_blocks[i][1], lang=lang_new or lang_old)
                 continue
             prompt = msg
             for path in files:
