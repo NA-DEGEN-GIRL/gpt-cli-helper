@@ -7,20 +7,25 @@ import difflib
 import argparse
 import readline
 from pathlib import Path
+from rich.prompt import Prompt
 from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 from rich.panel import Panel
+import threading
+import itertools
 import difflib
 import pyperclip
+import time
 from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 console = Console()
+
 
 CWD = Path(os.getcwd())
 SESSION_FILE = lambda name: CWD / f".gpt_session_{name}.json"
@@ -30,6 +35,8 @@ IGNORE_FILE = CWD / ".gptignore"
 OUTPUT_DIR = CWD / "gpt_outputs"
 MD_OUTPUT_DIR = CWD / "gpt_markdowns"
 EXCLUDE_PATTERNS = ["secret", "private", "key", "api"]
+
+stop_loading = None
 
 # autocompletion
 readline.set_completer_delims(' \t\n')
@@ -172,7 +179,20 @@ def save_markdown(content, filename="gpt_response.md"):
         f.write(content)
     console.print(f"[blue].md 파일 저장됨 → {path}")
 
+def loading_animation():
+    for c in itertools.cycle(['|', '/', '-', '\\']):
+        if stop_loading:
+            break
+        console.print(f'[cyan]Loading {c}', end='\r', style="bold cyan")
+        time.sleep(0.1)
+
 def ask_gpt(messages, model="gpt-4o", mode="dev", summary=""):
+    global stop_loading
+    stop_loading = False
+    
+    t = threading.Thread(target=loading_animation)
+    t.start()
+    
     system_prompt = {
         "role": "system",
         "content": summary if summary else (
@@ -185,6 +205,9 @@ def ask_gpt(messages, model="gpt-4o", mode="dev", summary=""):
     # 최근 메시지만 유지하여 context 초과 방지 (최대 약 10000 tokens 기준)
     trimmed = messages[-40:] if len(messages) > 40 else messages
     res = client.chat.completions.create(model=model, messages=trimmed)
+    stop_loading = True
+    t.join()
+    console.print(" " * 20, end='\r')  # Clear the loading line
     return res.choices[0].message
 
 def render_diff(a, b, lang="python"):
@@ -272,10 +295,14 @@ def chat_mode(session_name, copy_enabled=False):
     session = load_session(session_name)
     files, last, model = [], "", ["gpt-4o"]
     console.print(f"[bold cyan]GPT CLI 세션 시작: {session_name} (모델: {model[0]})")
+    msg = 'start'
     while True:
         try:
+            # 사용자 입력 받기
             msg = input("GPT> ").strip()
-            if not msg: continue
+            if not msg:
+                continue
+                        
             if msg == "/commands":
                 console.print(Panel.fit(command_list, title="[bold yellow]/명령어 목록", border_style="yellow"),markup=False)
                 continue
@@ -315,6 +342,12 @@ def chat_mode(session_name, copy_enabled=False):
                 prompt += f"\n\n[파일: {path}]\n```\n{read_code_file(path)}\n```"
             session.append({"role": "user", "content": prompt})
             save_history(prompt)
+            
+            # 구분용 텍스트로 입력 후 시각적 구분
+            console.print(Syntax(" ", "python", theme="monokai", background_color="#008C45"))
+            console.print(Syntax(" ", "python", theme="monokai", background_color="#F4F5F0"))
+            console.print(Syntax(" ", "python", theme="monokai", background_color="#CD212A"))
+            
             res = ask_gpt(session, model=model[0], mode=mode[0], summary=summary[0])
             session.append({"role": res.role, "content": res.content})
             save_session(session_name, session)

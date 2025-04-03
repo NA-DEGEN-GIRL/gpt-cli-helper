@@ -1,4 +1,0 @@
-openai>=1.0.0
-rich
-pyperclip
-python-dotenv
