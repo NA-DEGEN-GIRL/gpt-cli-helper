@@ -9,9 +9,11 @@ import readline
 from pathlib import Path
 from rich.console import Console
 from rich.syntax import Syntax
+from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 from rich.panel import Panel
+import difflib
 import pyperclip
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -47,6 +49,24 @@ command_list = """
 /reset                     → 세션 초기화
 /exit                      → 종료
 """
+
+# 명령어 문자열을 리스트로 변환
+commands = [line.split()[0] for line in command_list.strip().split('\n')]
+
+# 새로운 completer 함수 정의
+def completer(text, state):
+    # 파일명 자동 완성
+    options = [cmd for cmd in commands if cmd.startswith(text)]
+    options += glob.glob(text + '*')
+    options.append(None)
+    return options[state]
+
+# readline 설정
+readline.set_completer_delims(' \t\n')
+readline.parse_and_bind('tab: complete')
+readline.set_completer(completer)
+
+# 나머지 코드는 기존 코드와 동일합니다.
 
 def load_session(name):
     path = SESSION_FILE(name)
@@ -97,19 +117,38 @@ def mask_sensitive(content):
         content = re.sub(pattern, r"\1[REDACTED]", content, flags=re.IGNORECASE)
     return content
 
+#def extract_code_blocks(text):
+#    return re.findall(r"```(\w+)?\n([\s\S]*?)```", text)
+
 def extract_code_blocks(text):
-    return re.findall(r"```(\w+)?\n([\s\S]*?)```", text)
+    pattern = r"```(?:([\w+-]*)\n)?([\s\S]*?)```(?:\n|$)"
+    return re.findall(pattern, text, re.DOTALL)
+
 
 def save_code_blocks(blocks):
     OUTPUT_DIR.mkdir(exist_ok=True)
     paths = []
+
     for i, (lang, code) in enumerate(blocks, 1):
         ext = {"python": "py", "js": "js", "text": "txt"}.get(lang, lang)
-        path = OUTPUT_DIR / f"gpt_output_{i}.{ext}"
-        with open(path, "w") as f:
+        
+        # 파일 이름의 기본 포맷
+        base_filename = f"gpt_output_{i}"
+        path = OUTPUT_DIR / f"{base_filename}.{ext}"
+
+        # 존재하는 파일의 경우 번호를 증가시켜 새로운 파일명 생성
+        counter = 1
+        while path.exists():
+            path = OUTPUT_DIR / f"{base_filename}_{counter}.{ext}"
+            counter += 1
+
+        # 파일 저장
+        with open(path, "w", encoding="utf-8") as f:
             f.write(code)
         paths.append(path)
+
     return paths
+
 
 def save_markdown(content, filename="gpt_response.md"):
     MD_OUTPUT_DIR.mkdir(exist_ok=True)
@@ -133,19 +172,57 @@ def ask_gpt(messages, model="gpt-4o", mode="dev", summary=""):
     res = client.chat.completions.create(model=model, messages=trimmed)
     return res.choices[0].message
 
-def render_diff(a, b):
-    diff = difflib.unified_diff(a.splitlines(), b.splitlines(), lineterm="", fromfile="내 코드", tofile="GPT 코드")
-    console.print(Panel(Text("\n".join(diff), style="yellow"), title="코드 변경사항"))
+def render_diff(a, b, lang="python"):
+    # 두 줄을 라인별로 분리하고 unified_diff로 차이점 계산
+    diff = list(difflib.unified_diff(
+        a.splitlines(),
+        b.splitlines(),
+        lineterm=""  # 라인 종료 문자 미사용
+    ))
+
+    # 차이가 없으면 메시지를 출력하고 종료
+    if not diff:
+        console.print("No changes detected.", style="green")
+        return
+
+    # 각 차이점 라인에 대해 반복
+    for line in diff:
+        if line.startswith("---"):
+            console.print(line)
+            continue
+        if line.startswith("+++"):
+            console.print(line)
+            continue
+        # Syntax 객체로 구문 강조 설정
+        if line.startswith("-"):
+            # 삭제된 라인 - 빨간색 강조
+            syntax = Syntax('- '+line[1:], lang, theme="monokai", background_color="#330000")
+            console.print(syntax)
+        elif line.startswith("+"):
+            # 추가된 라인 - 녹색 강조
+            syntax = Syntax('+ '+line[1:], lang, theme="monokai", background_color="#000000")
+            console.print(syntax)
+        elif line.startswith("@@"):
+            # hunk 정보 - 청록색 강조
+            console.print(line, style="cyan")
+        else:
+            # 변경되지 않은 라인 - 기본 강조
+            syntax = Syntax('  '+line[1:], lang, theme="monokai", background_color="#2d2d2d")
+            console.print(syntax, style="dim")
 
 def render_response(content, last=""):
-    blocks_new = extract_code_blocks(content)
-    blocks_old = extract_code_blocks(last)
-    if content.strip():
-        console.print(content.split("```", 1)[0].strip())
-    for i, (lang, code) in enumerate(blocks_new):
-        console.print(Syntax(code, lang or "text", theme="monokai", word_wrap=True))
-        if i < len(blocks_old) and blocks_old[i][1] != code:
-            render_diff(blocks_old[i][1], code)
+    try:
+        blocks_new = extract_code_blocks(content)
+
+        if not blocks_new:
+            console.print(content)
+            return
+
+        for i, (lang, code) in enumerate(blocks_new):
+            console.print(Syntax(code, lang or "text", theme="monokai", word_wrap=True))
+
+    except Exception as e:
+        console.print(f"[red]렌더링 중 오류 발생: {e}")
 
 def chat_mode(session_name, copy_enabled=False):
     mode = ["dev"]  # 기본 모드는 개발자 모드
@@ -184,6 +261,12 @@ def chat_mode(session_name, copy_enabled=False):
                     original = read_code_file(path)
                     for _, gpt_code in extract_code_blocks(last):
                         render_diff(original, gpt_code)
+                continue
+            if msg == "/diffcode":
+                new_blocks = extract_code_blocks(last)
+                old_blocks = extract_code_blocks(session[-3]["content"]) if len(session) > 2 else []
+                for i in range(min(len(new_blocks), len(old_blocks))):
+                    render_diff(old_blocks[i][1], new_blocks[i][1])
                 continue
             prompt = msg
             for path in files:
