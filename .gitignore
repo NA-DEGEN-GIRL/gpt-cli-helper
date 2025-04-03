@@ -1,0 +1,6 @@
+.env
+__pycache__
+gpt*/
+test*/
+.gpt*
+.gptignore
