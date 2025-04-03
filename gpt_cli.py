@@ -17,26 +17,25 @@ from rich.panel import Panel
 from dotenv import load_dotenv
 from openai import OpenAI
 
-# Load environment variables
+# 환경 변수 로드
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 console = Console()
 
-# Paths and File Config
-CWD = Path(os.getcwd())
-SESSION_FILE = lambda name: CWD / f".gpt_session_{name}.json"
-HISTORY_FILE = CWD / ".gpt_prompt_history.txt"
-FAVORITES_FILE = CWD / ".gpt_favorites.json"
-IGNORE_FILE = CWD / ".gptignore"
-OUTPUT_DIR = CWD / "gpt_outputs"
-MD_OUTPUT_DIR = CWD / "gpt_markdowns"
+# 경로 및 파일 설정
+BASE_DIR = Path(os.getcwd())
+SESSION_FILE = lambda name: BASE_DIR / f".gpt_session_{name}.json"
+HISTORY_FILE = BASE_DIR / ".gpt_prompt_history.txt"
+FAVORITES_FILE = BASE_DIR / ".gpt_favorites.json"
+IGNORE_FILE = BASE_DIR / ".gptignore"
+OUTPUT_DIR = BASE_DIR / "gpt_outputs"
+MD_OUTPUT_DIR = BASE_DIR / "gpt_markdowns"
 EXCLUDE_PATTERNS = ["secret", "private", "key", "api"]
 
-# Global variable for loading animation
-stop_loading = None
+# 로딩 애니메이션을 제어하기 위한 이벤트
+stop_loading = threading.Event()
 
-# Command List
-COMMANDS = """
+COMMANDS_DESCRIPTIONS = """
 /commands                  → 명령어 리스트
 /files [file1 file2 ...]   → 여러 파일 설정
 /clearfiles                → 파일 초기화
@@ -46,44 +45,55 @@ COMMANDS = """
 /usefav [이름]             → 즐겨찾기 불러오기
 /favs                      → 즐겨찾기 목록 출력
 /diffme                    → 내 코드와 GPT 응답 비교
+/diffcode                  → 종전의 코드와 비교
 /reset                     → 세션 초기화
 /exit                      → 종료
 """
 
-commands = [line.split()[0] for line in COMMANDS.strip().split('\n')]
+commands = [line.split()[0] for line in COMMANDS_DESCRIPTIONS.strip().split('\n')]                                           
 
-# Define Autocompletion
 def completer(text, state):
     options = [cmd for cmd in commands if cmd.startswith(text)]
     options += glob.glob(text + '*')
     options.append(None)
-    return options[state]
+    return (options + [None])[state]
 
 readline.set_completer_delims(' \t\n')
 readline.parse_and_bind('tab: complete')
 readline.set_completer(completer)
 
-# Function Definitions
-def load_session(name):
-    path = SESSION_FILE(name)
-    return json.load(open(path, "r")) if path.exists() else []
+def load_json(filename, default=None):
+    if filename.exists():
+        with open(filename, "r") as f:
+            return json.load(f)
+    return default if default is not None else {}
 
-def save_session(name, messages):
-    with open(SESSION_FILE(name), "w") as f:
-        json.dump(messages, f, indent=2)
+def save_json(filename, data):
+    with open(filename, "w") as f:
+        json.dump(data, f, indent=2)
+
+def load_session(name):
+    return load_json(SESSION_FILE(name), [])
 
 def save_history(prompt):
-    with open(HISTORY_FILE, "a") as f:
-        f.write(prompt + "\n")
+    """ 사용자 입력 프롬프트를 히스토리 텍스트 파일에 저장합니다. """
+    try:
+        with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+            f.write(prompt + "\n")
+    except Exception as e:
+        console.print(f"[red]히스토리 저장 중 오류 발생: {e}")
+
+
+def save_session(name, messages):
+    save_json(SESSION_FILE(name), messages)
 
 def load_favorites():
-    return json.load(open(FAVORITES_FILE, "r")) if FAVORITES_FILE.exists() else {}
+    return load_json(FAVORITES_FILE, {})
 
 def save_favorite(name, prompt):
     favs = load_favorites()
     favs[name] = prompt
-    with open(FAVORITES_FILE, "w") as f:
-        json.dump(favs, f, indent=2)
+    save_json(FAVORITES_FILE, favs)
 
 def list_favorites():
     for name, prompt in load_favorites().items():
@@ -114,19 +124,10 @@ def save_code_blocks(blocks):
     OUTPUT_DIR.mkdir(exist_ok=True)
     paths = []
 
-    ext_mapping = {
-        "python": "py",
-        "javascript": "js",
-        "js": "js",
-        "text": "txt",
-        "html": "html",
-        "css": "css",
-        "java": "java",
-        "c": "c",
-        "cpp": "cpp",
-        "typescript": "ts",
-        "ts": "ts",
-    }
+    ext_mapping = {"python": "py", "javascript": "js", "js": "js", 
+                   "text": "txt", "html": "html", "css": "css", 
+                   "java": "java", "c": "c", "cpp": "cpp", 
+                   "typescript": "ts", "ts": "ts"}
 
     for i, (lang, code) in enumerate(blocks, 1):
         ext = ext_mapping.get(lang, "txt")
@@ -153,14 +154,14 @@ def save_markdown(content, filename="gpt_response.md"):
 
 def loading_animation():
     for c in itertools.cycle(['|', '/', '-', '\\']):
-        if stop_loading:
+        if stop_loading.is_set():
             break
-        console.print(f'[cyan]Loading {c}', end='\r', style="bold cyan")
+        console.print(f'[cyan]Loading {c}', end='\r')
         time.sleep(0.1)
 
 def ask_gpt(messages, model="gpt-4o", mode="dev", summary=""):
     global stop_loading
-    stop_loading = False
+    stop_loading.clear()  # Reset the stop event
     t = threading.Thread(target=loading_animation)
     t.start()
 
@@ -175,9 +176,10 @@ def ask_gpt(messages, model="gpt-4o", mode="dev", summary=""):
     messages = [system_prompt] + messages
     trimmed = messages[-40:] if len(messages) > 40 else messages
     res = client.chat.completions.create(model=model, messages=trimmed)
-    stop_loading = True
-    t.join()
-    console.print(" " * 20, end='\r')
+    
+    stop_loading.set()  # Signal loading to stop
+    t.join() # Ensure loading animation stops cleanly
+    console.print(" " * 20, end='\r') # Clear loading line
     return res.choices[0].message
 
 def render_diff(a, b, lang="python"):
@@ -236,7 +238,7 @@ def render_response(content, last=""):
 def chat_mode(session_name, copy_enabled=False):
     mode = ["dev"]
     summary = [""]
-    console.print(Panel.fit(COMMANDS, title="[bold yellow]/명령어 목록", border_style="yellow"), markup=False)
+    console.print(Panel.fit(COMMANDS_DESCRIPTIONS, title="[bold yellow]/명령어 목록", border_style="yellow"), markup=False)
 
     session = load_session(session_name)
     files, last, model = [], "", ["gpt-4o"]
@@ -249,7 +251,7 @@ def chat_mode(session_name, copy_enabled=False):
                 continue
 
             if msg == "/commands":
-                console.print(Panel.fit(COMMANDS, title="[bold yellow]/명령어 목록", border_style="yellow"), markup=False)
+                console.print(Panel.fit(COMMANDS_DESCRIPTIONS, title="[bold yellow]/명령어 목록", border_style="yellow"), markup=False)
                 continue
             if msg == "/exit":
                 break
