@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 from rich.panel import Panel
 from rich.text import Text
+from rich.panel import Panel
 import pyperclip
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -32,6 +33,20 @@ EXCLUDE_PATTERNS = ["secret", "private", "key", "api"]
 readline.set_completer_delims(' \t\n')
 readline.parse_and_bind('tab: complete')
 readline.set_completer(lambda text, state: (glob.glob(text+'*') + [None])[state])
+
+command_list = """
+/commands                  → 명령어 리스트
+/files [file1 file2 ...]   → 여러 파일 설정
+/clearfiles                → 파일 초기화
+/model [gpt-4|gpt-3.5|...] → 모델 변경
+/mode [dev|general]        → GPT 역할 전환
+/savefav [이름]            → 마지막 질문 즐겨찾기 등록
+/usefav [이름]             → 즐겨찾기 불러오기
+/favs                      → 즐겨찾기 목록 출력
+/diffme                    → 내 코드와 GPT 응답 비교
+/reset                     → 세션 초기화
+/exit                      → 종료
+"""
 
 def load_session(name):
     path = SESSION_FILE(name)
@@ -135,20 +150,8 @@ def render_response(content, last=""):
 def chat_mode(session_name, copy_enabled=False):
     mode = ["dev"]  # 기본 모드는 개발자 모드
     summary = [""]
-    console.print("""
-[bold cyan]💡 이 GPT는 코드 작성과 리팩터링, 파일 비교를 도와주는 개발 보조 도우미입니다!
+    console.print(Panel.fit(command_list, title="[bold yellow]/명령어 목록", border_style="yellow"),markup=False)
 
-[bold yellow]/명령어 목록]
-/files [file1 file2 ...]   → 여러 파일 설정
-/clearfiles               → 파일 초기화
-/model [gpt-4|gpt-3.5|...] → 모델 변경
-/savefav [이름]           → 마지막 질문 즐겨찾기 등록
-/usefav [이름]            → 즐겨찾기 불러오기
-/favs                     → 즐겨찾기 목록 출력
-/diffme                   → 내 코드와 GPT 응답 비교
-/reset                    → 세션 초기화
-/exit                     → 종료
-""")
     session = load_session(session_name)
     files, last, model = [], "", ["gpt-4o"]
     console.print(f"[bold cyan]GPT CLI 세션 시작: {session_name} (모델: {model[0]})")
@@ -157,19 +160,7 @@ def chat_mode(session_name, copy_enabled=False):
             msg = input("GPT> ").strip()
             if not msg: continue
             if msg == "/commands":
-                console.print("""
-[bold yellow]/명령어 목록]
-/files [file1 file2 ...]   → 여러 파일 설정
-/clearfiles               → 파일 초기화
-/model [gpt-4|gpt-3.5|...] → 모델 변경
-/mode [dev|general]       → GPT 역할 전환
-/savefav [이름]           → 마지막 질문 즐겨찾기 등록
-/usefav [이름]            → 즐겨찾기 불러오기
-/favs                     → 즐겨찾기 목록 출력
-/diffme                   → 내 코드와 GPT 응답 비교
-/reset                    → 세션 초기화
-/exit                     → 종료
-""")
+                console.print(Panel.fit(command_list, title="[bold yellow]/명령어 목록", border_style="yellow"),markup=False)
                 continue
 
             if msg == "/exit": break
