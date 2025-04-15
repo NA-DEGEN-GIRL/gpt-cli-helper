@@ -22,6 +22,10 @@ load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 console = Console()
 
+TRIMMED_HISTORY_LENGTH = 100   # 대화(컨텍스트) 길이 유지 갯수
+SUMMARY_TRIGGER_COUNT = 3      # 몇 번 대화마다 summary 갱신
+SUMMARY_CONTEXT_LENGTH = 20    # summary 쿼리 시 요약에 포함할 대화 메시지 개수
+
 # 경로 및 파일 설정
 BASE_DIR = Path(os.getcwd())
 SESSION_FILE = lambda name: BASE_DIR / f".gpt_session_{name}.json"
@@ -159,7 +163,7 @@ def loading_animation():
         console.print(f'[cyan]Loading {c}', end='\r')
         time.sleep(0.1)
 
-def ask_gpt(messages, model="gpt-4o", mode="dev", summary=""):
+def ask_gpt(messages, model="gpt-4.1", mode="dev", summary=""):
     global stop_loading
     stop_loading.clear()  # Reset the stop event
     t = threading.Thread(target=loading_animation)
@@ -168,13 +172,13 @@ def ask_gpt(messages, model="gpt-4o", mode="dev", summary=""):
     system_prompt = {
         "role": "system",
         "content": summary if summary else (
-            "너는 숙련된 프로그래밍 전문가야. 다양한 언어의 코드 작성, 리팩터링, 설명, 디버깅을 도와줄 수 있어."
+            "너는 숙련된 프로그래밍 전문가야. 다양한 언어의 코드 작성, 리팩터링, 설명, 디버깅을 도와줄 수 있어. 항상 한국어로 응답해주세요."
             if mode == "dev" else
-            "당신은 친절하고 유용한 AI 어시스턴트입니다. 다양한 일상 질문에도 친절하게 답변해주세요."
+            "당신은 친절하고 유용한 AI 어시스턴트입니다. 다양한 일상 질문에도 친절하게 답변해주세요. 기본적으로 한국어로 응답해주세요."
         )
     }
     messages = [system_prompt] + messages
-    trimmed = messages[-40:] if len(messages) > 40 else messages
+    trimmed = messages[-TRIMMED_HISTORY_LENGTH:] if len(messages) > TRIMMED_HISTORY_LENGTH else messages
     res = client.chat.completions.create(model=model, messages=trimmed)
     
     stop_loading.set()  # Signal loading to stop
@@ -235,13 +239,23 @@ def render_response(content, last=""):
     except Exception as e:
         console.print(f"[red]렌더링 중 오류 발생: {e}")
 
+def request_summary(messages, model="gpt-4.1"):
+    """
+    주어진 메시지 목록을 요약 요청하여 반환합니다.
+    """
+    # 최근 20개의 메시지를 요약하도록 설정
+    context = messages[-SUMMARY_CONTEXT_LENGTH:]
+    summary_prompt = [{"role": "system", "content": "다음 대화 내용을 요약해 주세요."}] + context
+    response = client.chat.completions.create(model=model, messages=summary_prompt)
+    return response.choices[0].message.content
+
 def chat_mode(session_name, copy_enabled=False):
     mode = ["dev"]
     summary = [""]
     console.print(Panel.fit(COMMANDS_DESCRIPTIONS, title="[bold yellow]/명령어 목록", border_style="yellow"), markup=False)
 
     session = load_session(session_name)
-    files, last, model = [], "", ["gpt-4o"]
+    files, last, model = [], "", ["gpt-4.1"]
     console.print(f"[bold cyan]GPT CLI 세션 시작: {session_name} (모델: {model[0]})")
 
     while True:
@@ -298,7 +312,7 @@ def chat_mode(session_name, copy_enabled=False):
                     render_diff(old_blocks[i][1], new_blocks[i][1], lang=lang_new or lang_old)
                 continue
 
-            prompt = msg
+            prompt = msg + "\n\n답변은 한국어로 주세요."
             for path in files:
                 prompt += f"\n\n[파일: {path}]\n```\n{read_code_file(path)}\n```"
             session.append({"role": "user", "content": prompt})
@@ -307,6 +321,14 @@ def chat_mode(session_name, copy_enabled=False):
             console.print(Syntax(" ", "python", theme="monokai", background_color="#008C45"))
             console.print(Syntax(" ", "python", theme="monokai", background_color="#F4F5F0"))
             console.print(Syntax(" ", "python", theme="monokai", background_color="#CD212A"))
+
+            ''' 답변이 이상해짐
+            if len(session) % SUMMARY_TRIGGER_COUNT == 0:
+                try:
+                    summary[0] = request_summary(session, model=model[0])  
+                except Exception as e:
+                    print(e)
+            '''
 
             res = ask_gpt(session, model=model[0], mode=mode[0], summary=summary[0])
             session.append({"role": res.role, "content": res.content})
