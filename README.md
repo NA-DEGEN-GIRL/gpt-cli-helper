@@ -153,33 +153,51 @@ python gptcli_o3.py "파이썬에서 리스트의 중복 요소를 제거하는 
 
 채팅 세션 중 `Question>` 프롬프트에서 아래 명령어를 사용할 수 있습니다.
 
-| 명령어              | 설명                                                       | 예시     
-|
-| :------------------ | :--------------------------------------------------------- | 
-:---------------------- |
-| `/commands`         | 사용 가능한 모든 명령어 목록을 표시합니다.                 | 
-`/commands`             |
-| `/pretty_print`     | 고급 출력(Rich)과 순수 텍스트(Raw) 모드를 전환합니다.      | `/pretty_print`         |
-| `/select_model`     | `ai_models.txt` 기반의 TUI 모델 선택기를 엽니다.           | 
-`/select_model`         |
-| `/model <slug>`     | 모델을 직접 변경합니다.                                    | `/model openai/gpt-4o`  |
-| `/all_files`        | TUI 파일 선택기를 열어 컨텍스트에 추가할 파일을 선택합니다. | 
-`/all_files`            |
-| `/files <f1> <f2>`  | 공백으로 구분하여 파일 경로를 직접 지정합니다.             | `/files main.py`        |
-| `/clearfiles`       | 현재 첨부된 모든 파일을 초기화합니다.                      | 
-`/clearfiles`           |
-| `/mode <mode>`      | AI의 페르소나를 `dev` 또는 `general`로 변경합니다.         | `/mode dev`             |
-| `/savefav <name>`   | 마지막 질문을 즐겨찾기에 저장합니다.                       | `/savefav
-python-dedup` |
-| `/usefav <name>`    | 저장된 즐겨찾기 질문을 불러와 입력합니다.                  | `/usefav python-dedup`  |
-| `/favs`             | 저장된 모든 즐겨찾기 목록을 출력합니다.                    | `/favs`  
-|
-| `/diffme`           | 첨부된 파일과 AI의 응답 코드 간의 차이를 비교합니다.       | `/diffme`               |
-| `/diffcode`         | 이전 AI 응답과 현재 응답의 코드 블록 간 차이를 비교합니다. | 
-`/diffcode`             |
-| `/reset`            | 현재 세션의 모든 대화 내역을 삭제합니다.                   | `/reset`                |
-| `/exit`             | 프로그램을 종료합니다.                                     | `/exit`  
-|
+*   **/commands**
+    *   **설명:** 사용 가능한 모든 명령어 목록을 표시합니다.
+    *   **예시:** `/commands`
+*   **/pretty_print**
+    *   **설명:** 고급 출력(Rich)과 순수 텍스트(Raw) 모드를 전환합니다.
+    *   **예시:** `/pretty_print`
+*   **/select_model**
+    *   **설명:** `ai_models.txt` 기반의 TUI 모델 선택기를 엽니다.
+    *   **예시:** `/select_model`
+*   **/model `<slug>`**
+    *   **설명:** 모델을 직접 변경합니다.
+    *   **예시:** `/model openai/gpt-4o`
+*   **/all_files**
+    *   **설명:** TUI 파일 선택기를 열어 컨텍스트에 추가할 파일을 선택합니다.
+    *   **예시:** `/all_files`
+*   **/files `<f1> <f2> ...`**
+    *   **설명:** 공백으로 구분하여 파일 경로를 직접 지정합니다.
+    *   **예시:** `/files main.py utils.py`
+*   **/clearfiles**
+    *   **설명:** 현재 첨부된 모든 파일을 초기화합니다.
+    *   **예시:** `/clearfiles`
+*   **/mode `<dev|general>`**
+    *   **설명:** AI의 페르소나를 `dev` 또는 `general`로 변경합니다.
+    *   **예시:** `/mode dev`
+*   **/savefav `<name>`**
+    *   **설명:** 마지막 질문을 즐겨찾기에 저장합니다.
+    *   **예시:** `/savefav python-dedup`
+*   **/usefav `<name>`**
+    *   **설명:** 저장된 즐겨찾기 질문을 불러와 입력합니다.
+    *   **예시:** `/usefav python-dedup`
+*   **/favs**
+    *   **설명:** 저장된 모든 즐겨찾기 목록을 출력합니다.
+    *   **예시:** `/favs`
+*   **/diffme**
+    *   **설명:** 첨부된 파일과 AI의 응답 코드 간의 차이를 비교합니다.
+    *   **예시:** `/diffme`
+*   **/diffcode**
+    *   **설명:** 이전 AI 응답과 현재 응답의 코드 블록 간 차이를 비교합니다.
+    *   **예시:** `/diffcode`
+*   **/reset**
+    *   **설명:** 현재 세션의 모든 대화 내역을 삭제합니다.
+    *   **예시:** `/reset`
+*   **/exit**
+    *   **설명:** 프로그램을 종료합니다.
+    *   **예시:** `/exit`
 
 ## 🔧 고급 기능 상세
 
