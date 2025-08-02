@@ -40,6 +40,7 @@ from rich.text import Text
 # ────────────────────────────────
 # 환경 초기화 / ENV INIT
 # ────────────────────────────────
+CONFIG_DIR = Path.home() / "codes" / "gpt_cli"
 BASE_DIR = Path.cwd()
 
 #_GPCLI_SCREEN = urwid.raw_display.Screen()
@@ -55,11 +56,12 @@ FAVORITES_FILE = BASE_DIR / ".gpt_favorites.json"
 IGNORE_FILE = BASE_DIR / ".gptignore"
 OUTPUT_DIR = BASE_DIR / "gpt_outputs"
 MD_OUTPUT_DIR = BASE_DIR / "gpt_markdowns"
-MODELS_FILE = BASE_DIR / "ai_models.txt"
+MODELS_FILE = CONFIG_DIR / "ai_models.txt"
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 MD_OUTPUT_DIR.mkdir(exist_ok=True)
 
+BLOCK_KEY = "```"
 TRIMMED_HISTORY = 20
 console = Console()
 stop_loading = threading.Event()
@@ -224,9 +226,8 @@ def prepare_content_part(path: Path) -> Dict[str, Any]:
     safe_text = mask_sensitive(text)
     return {
         "type": "text",
-        "text": f"\n\n[파일: {path}]\n```\n{safe_text}\n```",
+        "text": f"\n\n[파일: {path}]\n{BLOCK_KEY}\n{safe_text}\n{BLOCK_KEY}",
     }
-
 
 SENSITIVE_KEYS = ["secret", "private", "key", "api"]
 PALETTE = [                               
@@ -245,10 +246,6 @@ def mask_sensitive(text: str) -> str:
 # ──────────────────────────────────────────────────────
 # 5. 코드 블록 추출 / 저장
 # ──────────────────────────────────────────────────────
-def _extract_code_blocks(markdown: str) -> List[Tuple[str, str]]:
-    pattern = r"```(?:([\w+-]*)\n)?([\s\S]*?)```(?:\n|$)"
-    return re.findall(pattern, markdown)
-
 def extract_code_blocks(markdown: str) -> List[Tuple[str, str]]:
     """
     State-machine 기반으로 마크다운에서 코드 블록을 추출합니다.
@@ -257,49 +254,43 @@ def extract_code_blocks(markdown: str) -> List[Tuple[str, str]]:
     blocks = []
     lines = markdown.split('\n')
     
-    current_state = "NORMAL"  # "NORMAL" 또는 "IN_CODE"
-    code_buffer = []
+    in_code_block = False
+    nesting_depth = 0
+    code_buffer: List[str] = []
     language = ""
-
+    
     for line in lines:
+        stripped_line = line.strip()
+
         # 코드 블록 시작 ``` 감지
-        if line.rstrip().startswith("```") and current_state == "NORMAL":
-            current_state = "IN_CODE"
-            language = line.strip()[3:].strip() or "text"
+        if stripped_line.startswith(BLOCK_KEY) and not in_code_block:
+            in_code_block = True
+            language = line.strip()[len(BLOCK_KEY):].strip() or "text"
+            nesting_depth = 0
             code_buffer = []  # 새 블록을 위해 버퍼 초기화
         
         # 코드 블록 종료 ``` 감지
-        elif line.rstrip().startswith("```") and current_state == "IN_CODE":
-            blocks.append((language, "\n".join(code_buffer)))
-            current_state = "NORMAL"
-            language = ""
-            code_buffer = []
-        
-        # 코드 블록 내용 수집
-        elif current_state == "IN_CODE":
-            code_buffer.append(line)
+        elif in_code_block:
+            
+            if stripped_line.startswith(BLOCK_KEY):
+                if stripped_line[len(BLOCK_KEY):].strip():
+                    nesting_depth += 1
+                else:
+                    nesting_depth -= 1
+            
+            if nesting_depth < 0:
+                blocks.append((language, "\n".join(code_buffer)))
+                in_code_block = False
+                nesting_depth = 0
+                language = ""
+            else:
+                code_buffer.append(line)
 
     # 파일 끝까지 코드 블록이 닫히지 않은 엣지 케이스 처리
-    if current_state == "IN_CODE" and code_buffer:
+    if in_code_block and code_buffer:
         blocks.append((language, "\n".join(code_buffer)))
         
     return blocks
-
-def _save_code_blocks(blocks: Sequence[Tuple[str, str]]) -> List[Path]:
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    saved: List[Path] = []
-    ext_map = {"python": "py", "javascript": "js", "typescript": "ts", "text": "txt"}
-    for i, (lang, code) in enumerate(blocks, 1):
-        ext = ext_map.get(lang.lower(), "txt") if lang else "txt"
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        p = OUTPUT_DIR / f"gpt_output_{timestamp}_{i}.{ext}"
-        cnt = 1
-        while p.exists():
-            p = OUTPUT_DIR / f"gpt_output_{timestamp}_{i}_{cnt}.{ext}"
-            cnt += 1
-        p.write_text(code, encoding="utf-8")
-        saved.append(p)
-    return saved
 
 def save_code_blocks(blocks: Sequence[Tuple[str, str]]) -> List[Path]:
     OUTPUT_DIR.mkdir(exist_ok=True)
@@ -560,444 +551,6 @@ class FileSelector:
 # ──────────────────────────────────────────────────────
 # 8. OpenRouter 호출 (스트리밍)
 # ──────────────────────────────────────────────────────
-def _ask_stream(
-    messages: List[Dict[str, Any]],
-    model: str,
-    mode: str,
-) -> Optional[str]:
-    system_prompt = {
-        "role": "system",
-        "content": (
-            "너는 숙련된 프로그래밍 전문가야. 항상 한국어로 답한다."
-            if mode == "dev"
-            else "당신은 친절한 AI 어시스턴트입니다. 주로 한국어로 답하세요."
-        ),
-    }
-    model_online = model if model.endswith(":online") else f"{model}:online"
-    
-    with console.status("[cyan]Thinking...", spinner="dots"):
-        try:
-            stream = client.chat.completions.create(
-                model=model_online,
-                messages=[system_prompt] + messages[-TRIMMED_HISTORY:],
-                stream=True,
-                extra_body={'reasoning':{}},
-            )
-        except OpenAIError as e:
-            console.print(f"[red]API 오류: {e}[/red]")
-            return None
-
-    # 상태 머신 변수들
-    full_reply = ""
-    current_state = "NORMAL"
-    buffer = ""
-    code_buffer = ""
-    language = "text"
-    normal_buffer = ""
-    last_flush_time = time.time()
-
-    console.print("[bold]GPT:[/bold]")
-    
-    # stream을 iterator로 변환
-    stream_iter = iter(stream)
-    
-    try:
-        while True:
-            chunk = next(stream_iter)
-            delta = chunk.choices[0].delta
-
-            # Reasoning 처리 (delta.reasoning이 있는 경우)                                        
-            if hasattr(delta, 'reasoning') and delta.reasoning and current_state == "NORMAL":     
-                if normal_buffer:                                                                 
-                    console.print(normal_buffer, end="", markup=False)                            
-                    normal_buffer = ""                                                            
-                                                                                                      
-                    current_state = "IN_REASONING"                                                    
-                    reasoning_buffer = delta.reasoning                                                
-                                                                                                      
-                    # Reasoning Live 패널                                                             
-                    with Live(                                                                        
-                        Panel(                                                                        
-                            "[dim]추론 시작...[/dim]",                                                
-                            height=10,                                                                
-                            title="[magenta]🤔 추론 과정 (Reasoning)[/magenta]",                      
-                            border_style="magenta"                                                    
-                        ),                                                                            
-                        console=console,                                                              
-                        auto_refresh=True,                                                            
-                        refresh_per_second=4,                                                         
-                        transient=True                                                                
-                    ) as live:                                                                        
-                        # reasoning이 계속되는 동안                                                   
-                        while True:                                                                  
-                            try:
-                                chunk = next(stream_iter)                                             
-                                delta = chunk.choices[0].delta                                        
-                                                                                                    
-                                # 추가 reasoning 내용                                                 
-                                if hasattr(delta, 'reasoning') and delta.reasoning:                   
-                                    reasoning_buffer += delta.reasoning                               
-                                                                                                    
-                                    # 패널 업데이트                                                   
-                                    lines = reasoning_buffer.splitlines()                             
-                                    total_lines = len(lines)                                          
-                                                                                                    
-                                    if total_lines > 8:                                               
-                                        display_lines = lines[-8:]                                    
-                                        display_text = f"[dim]... ({total_lines - 8}줄 생략)...[/dim]\n"                                                                                      
-                                        display_text += "\n".join(f"[italic]{l}[/italic]" for l in display_lines)                                                                                    
-                                    else:                                                             
-                                        display_text = "\n".join(f"[italic]{l}[/italic]" for l in lines)                                                                                            
-                                                                                                    
-                                    status = f"[dim]{total_lines}줄 분석중...[/dim]"                  
-                                    live.update(                                                      
-                                        Panel(                                                        
-                                            display_text,                                             
-                                            height=10,                                                
-                                            title=f"[magenta]🤔 추론 과정 {status}[/magenta]",        
-                                            border_style="magenta"                                    
-                                        )                                                             
-                                    )                                                                 
-                                                                                                    
-                                # reasoning이 끝나고 content가 시작되면                               
-                                if delta.content:                                                     
-                                    content = delta.content                                           
-                                    full_reply += content                                             
-                                    buffer += content                                                 
-                                    current_state = "NORMAL"                                          
-                                    break                                                             
-                                                                                                        
-                            except StopIteration:                                                     
-                                current_state = "NORMAL"                                              
-                                break                                                                 
-                                                                                                    
-                # Reasoning 완료 메시지                                                           
-                console.print("[dim]✓ 추론 완료[/dim]\n")                                         
-                continue
-            if not (delta and delta.content):
-                continue
-
-            content = delta.content
-            full_reply += content
-            buffer += content
-
-            # 줄바꿈 기준 처리
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-
-                if current_state == "NORMAL":
-                    # 코드 블록 시작 감지
-                    if line.rstrip().startswith("```"):
-                        # 남은 normal_buffer 출력
-                        if normal_buffer:
-                            console.print(normal_buffer, end="", markup=False)
-                            normal_buffer = ""
-                        
-                        language = line.strip()[3:] or "text"
-                        current_state = "IN_CODE"
-                        code_buffer = ""
-                        
-                        #console.print()  # 빈 줄
-                        
-                        # 고정 높이 Live 패널로 코드 표시
-                        with Live(
-                            Panel(
-                                "[dim]대기중...[/dim]", 
-                                height=20, 
-                                title=f"[yellow]코드 입력중 ({language})[/yellow]",
-                                border_style="dim"
-                            ),
-                            console=console,
-                            auto_refresh=True,
-                            refresh_per_second=5,
-                            transient=True  # 완료되면 사라짐
-                        ) as live:
-                            # 코드 블록이 끝날 때까지 계속
-                            while current_state == "IN_CODE":
-                                try:
-                                    chunk = next(stream_iter)
-                                    delta = chunk.choices[0].delta
-                                    if delta and delta.content:
-                                        content = delta.content
-                                        full_reply += content
-                                        buffer += content
-                                        
-                                        while "\n" in buffer:
-                                            line, buffer = buffer.split("\n", 1)
-                                            
-                                            if line.rstrip() == "```":
-                                                current_state = "NORMAL"
-                                                break
-                                            
-                                            code_buffer += line + "\n"
-                                            
-                                            # 패널 업데이트
-                                            lines = code_buffer.splitlines()
-                                            total_lines = len(lines)
-                                            
-                                            # 최대 10줄만 표시 (패널 높이 - 2)
-                                            if total_lines > 10:
-                                                display_lines = lines[-10:]
-                                                display_text = f"[dim]... ({total_lines - 10}줄 생략) ...[/dim]\n"
-                                                display_text += "\n".join(f"[cyan]{l}[/cyan]" for l in display_lines)
-                                            else:
-                                                display_text = "\n".join(f"[cyan]{l}[/cyan]" for l in lines)
-                                            
-                                            # 라인 수 정보 추가
-                                            status_info = f"[dim]{total_lines}줄[/dim]"
-                                            live.update(
-                                                Panel(
-                                                    display_text,
-                                                    height=12,
-                                                    title=f"[yellow]코드 입력중 ({language}) {status_info}[/yellow]",
-                                                    border_style="dim"
-                                                )
-                                            )
-                                        
-                                        if current_state == "NORMAL":
-                                            break
-                                            
-                                except StopIteration:
-                                    current_state = "NORMAL" 
-                                    break
-                        
-                        # Live 종료 후 최종 하이라이팅 코드 출력
-                        if code_buffer.rstrip():
-                            console.print(f"[bold cyan]```{language}[/bold cyan]")
-
-                            lines = code_buffer.rstrip().split('\n')
-
-                            min_indent = float('inf')
-                            for line in lines:
-                                if line.strip():  # 빈 줄이 아닌 경우
-                                    indent = len(line) - len(line.lstrip()) 
-                                    min_indent = min(min_indent, indent)
-                            
-                            if min_indent < float('inf') and min_indent > 0:
-                                normalized_lines = []
-                                for line in lines:
-                                    if line.strip():
-                                        normalized_lines.append(line[min_indent:]) 
-                                    else:
-                                        normalized_lines.append('')
-                                code_to_display = '\n'.join(normalized_lines)
-                            else:
-                                code_to_display = code_buffer.rstrip() 
-
-
-                            syntax_block = Syntax(
-                                code_to_display,
-                                language,
-                                theme="monokai",
-                                line_numbers=True,
-                                code_width=None,
-                                word_wrap=True
-                            )
-                            console.print(syntax_block)
-                            console.print("[bold cyan]```[/bold cyan]")
-                        #console.print()
-                        
-                    else:
-                        # 일반 텍스트 버퍼에 추가
-                        normal_buffer += line + "\n"
-                
-                elif current_state == "IN_CODE":
-                    # 이미 Live 내부에서 처리됨
-                    pass
-
-            # 버퍼에 남은 내용 처리
-            if current_state == "NORMAL" and buffer:
-                normal_buffer += buffer
-                buffer = ""
-                
-                # 일반 텍스트 출력
-                current_time = time.time()
-                if len(normal_buffer) > 20 or (current_time - last_flush_time > 0.25):
-                    console.print(normal_buffer, end="", markup=False)
-                    normal_buffer = ""
-                    last_flush_time = current_time
-                    
-    except StopIteration:
-        pass
-
-    # 남은 내용 처리
-    if current_state == "NORMAL" and normal_buffer:
-        console.print(normal_buffer, end="", markup=False)
-    elif current_state == "IN_CODE":
-        console.print("\n[yellow]// 경고: 코드 블록이 제대로 닫히지 않았습니다[/yellow]")
-        if code_buffer:
-            console.print(Syntax(code_buffer.rstrip(), language, theme="monokai", line_numbers=True))
-
-    console.print()
-    return full_reply
-
-def __ask_stream(
-    messages: List[Dict[str, Any]],
-    model: str,
-    mode: str,
-) -> Optional[str]:
-    system_prompt = {
-        "role": "system",
-        "content": (
-            "너는 숙련된 프로그래밍 전문가야. 항상 한국어로 답한다."
-            if mode == "dev"
-            else "당신은 친절한 AI 어시스턴트입니다. 주로 한국어로 답하세요."
-        ),
-    }
-    model_online = model if model.endswith(":online") else f"{model}:online"
-    
-    # reasoning 지원 모델 감지 및 extra_body 설정
-    use_reasoning = any(x in model.lower() for x in ['o1-', 'reasoning'])
-    extra_body = {'reasoning': {}} if use_reasoning else {}
-
-    with console.status("[cyan]Thinking...", spinner="dots"):
-        try:
-            stream = client.chat.completions.create(
-                model=model_online,
-                messages=[system_prompt] + messages[-TRIMMED_HISTORY:],
-                stream=True,
-                extra_body=extra_body,
-            )
-        except OpenAIError as e:
-            console.print(f"[red]API 오류: {e}[/red]")
-            return None
-
-    # 상태 머신 변수 초기화
-    full_reply = ""
-    current_state = "NORMAL"
-    buffer = ""
-    code_buffer, language = "", "text"
-    normal_buffer, last_flush_time = "", time.time()
-    reasoning_buffer = ""
-
-    console.print("[bold]GPT:[/bold]")
-    stream_iter = iter(stream)
-    
-    try:
-        while True:
-            chunk = next(stream_iter)
-            delta = chunk.choices[0].delta
-
-            # Reasoning 처리 (Live 패널, transient=True 사용)
-            if hasattr(delta, 'reasoning') and delta.reasoning:
-                if normal_buffer: console.print(normal_buffer, end="", markup=False); normal_buffer = ""
-                
-                with Live(console=console, auto_refresh=True, refresh_per_second=4, transient=True) as live:
-                    reasoning_buffer = delta.reasoning
-                    while True:
-                        try:
-                            # 패널 내용 생성
-                            lines = reasoning_buffer.splitlines()
-                            total_lines = len(lines)
-                            display_text = "\n".join(f"[italic]{l}[/italic]" for l in lines[-8:])
-                            if total_lines > 8:
-                                display_text = f"[dim]... ({total_lines - 8}줄 생략) ...[/dim]\n{display_text}"
-                            
-                            # 패널 업데이트
-                            panel = Panel(display_text, height=10, title=f"[magenta]🤔 추론 과정 ({total_lines}줄)[/magenta]", border_style="magenta")
-                            live.update(panel)
-
-                            # 다음 청크 처리
-                            chunk = next(stream_iter)
-                            delta = chunk.choices[0].delta
-                            if hasattr(delta, 'reasoning') and delta.reasoning:
-                                reasoning_buffer += delta.reasoning
-                            elif delta.content:
-                                buffer += delta.content
-                                break  # reasoning 종료, content 시작
-                        except StopIteration:
-                            break # 스트림 종료
-                continue # 다음 메인 루프 반복
-
-            if not (delta and delta.content):
-                continue
-            
-            # 메인 콘텐츠 버퍼링 및 파싱
-            full_reply += delta.content
-            buffer += delta.content
-
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-
-                if current_state == "NORMAL":
-                    # 코드 블록 시작 감지
-                    if line.rstrip().startswith("```"):
-                        if normal_buffer: console.print(normal_buffer, end="", markup=False); normal_buffer = ""
-                        
-                        language = line.strip()[3:] or "text"
-                        current_state = "IN_CODE"
-                        code_buffer = ""
-                        
-                        # Live 객체 생성 (transient=False가 핵심)
-                        live = Live(console=console, auto_refresh=True, refresh_per_second=5)
-                        with live:
-                            # 코드 블록 종료까지 루프
-                            while current_state == "IN_CODE":
-                                # 임시 패널 업데이트
-                                lines, total_lines = code_buffer.splitlines(), len(code_buffer.splitlines())
-                                panel_height, display_height = 12, 10
-                                
-                                display_text = "\n".join(f"[cyan]{l}[/cyan]" for l in lines[-display_height:])
-                                if total_lines > display_height:
-                                    display_text = f"[dim]... ({total_lines - display_height}줄 생략) ...[/dim]\n{display_text}"
-                                
-                                temp_panel = Panel(display_text, height=panel_height, title=f"[yellow]코드 입력중 ({language}) {total_lines}줄[/yellow]", border_style="dim")
-                                live.update(temp_panel)
-                                
-                                # 다음 청크를 가져와 code_buffer 채우기
-                                try:
-                                    chunk = next(stream_iter)
-                                    if chunk.choices[0].delta and chunk.choices[0].delta.content:
-                                        full_reply += chunk.choices[0].delta.content
-                                        buffer += chunk.choices[0].delta.content
-                                        
-                                        while "\n" in buffer:
-                                            sub_line, buffer = buffer.split("\n", 1)
-                                            if sub_line.rstrip() == "```":
-                                                current_state = "NORMAL"
-                                                break
-                                            code_buffer += sub_line + "\n"
-                                        
-                                        if current_state == "NORMAL":
-                                            break
-                                except StopIteration:
-                                    current_state = "NORMAL"; break
-                            
-                            # 루프 종료 후, 최종 결과물로 업데이트하고 Live 종료
-                            if code_buffer.rstrip():
-                                syntax_block = Syntax(code_buffer.rstrip(), language, theme="monokai", line_numbers=True, word_wrap=True)
-                                final_panel = Panel(syntax_block, title=f"[green]코드 ({language})[/green]", border_style="green")
-                                live.update(final_panel)
-                            else:
-                                live.update("")  # 빈 블록이면 아무것도 남기지 않음
-                            live.stop()
-                            
-                    else:
-                        normal_buffer += line + "\n"
-                # current_state == "IN_CODE" 경우는 위에서 모두 처리됨
-
-            # 버퍼에 남은 일반 텍스트가 있다면 출력
-            if current_state == "NORMAL" and buffer:
-                normal_buffer += buffer; buffer = ""
-            
-            current_time = time.time()
-            if normal_buffer and (len(normal_buffer) > 20 or (current_time - last_flush_time > 0.25)):
-                console.print(normal_buffer, end="", markup=False)
-                normal_buffer = ""
-                last_flush_time = current_time
-
-    except StopIteration:
-        pass
-
-    # 스트림 종료 후 남은 버퍼 처리
-    if normal_buffer: console.print(normal_buffer, end="", markup=False)
-    if current_state == "IN_CODE" and code_buffer:
-        console.print("\n[yellow]경고: 코드 블록이 제대로 닫히지 않았습니다.[/yellow]")
-        console.print(Syntax(code_buffer.rstrip(), language, theme="monokai", line_numbers=True))
-
-    console.print()
-    return full_reply
-
 def ask_stream(
     messages: List[Dict[str, Any]],
     model: str,
@@ -1089,6 +642,8 @@ def ask_stream(
     normal_buffer, last_flush_time = "", time.time()
     reasoning_buffer = ""
     
+    nesting_depth = 0
+
     console.print(f"[bold]{model}:[/bold]")
     stream_iter = iter(stream)
     
@@ -1129,14 +684,16 @@ def ask_stream(
 
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
+                stripped_line = line.strip()
 
                 if current_state == "NORMAL":
-                    if line.rstrip().startswith("```"):
+                    if stripped_line.startswith(BLOCK_KEY):
                         if normal_buffer: console.print(normal_buffer, end="", markup=False); normal_buffer = ""
                         
-                        language = line.strip()[3:] or "text"
                         current_state = "IN_CODE"
+                        language = line.strip()[len(BLOCK_KEY):] or "text"
                         code_buffer = ""
+                        nesting_depth = 0
                         
                         live = Live(console=console, auto_refresh=True, refresh_per_second=5)
                         with live:
@@ -1159,9 +716,17 @@ def ask_stream(
                                         
                                         while "\n" in buffer:
                                             sub_line, buffer = buffer.split("\n", 1)
-                                            if sub_line.rstrip() == "```":
+                                            sub_stripped = sub_line.strip()
+                                            if sub_stripped.startswith(BLOCK_KEY):
+                                                if sub_stripped[len(BLOCK_KEY):].strip():
+                                                    nesting_depth += 1
+                                                else:
+                                                    nesting_depth -= 1
+                                            if nesting_depth < 0:
                                                 current_state = "NORMAL"; break
-                                            code_buffer += sub_line + "\n"
+                                            else:
+                                                code_buffer += sub_line +"\n"
+
                                         
                                         if current_state == "NORMAL": break
                                 except StopIteration:
@@ -1206,7 +771,7 @@ prompt_session = PromptSession(
     history=FileHistory(PROMPT_HISTORY_FILE),
     auto_suggest=AutoSuggestFromHistory(),
     multiline=True,
-    prompt_continuation="         ",
+    prompt_continuation="          ",
 )
 
 
@@ -1216,14 +781,15 @@ prompt_session = PromptSession(
 COMMANDS = """
 /commands            → 명령어 리스트
 /pretty_print        → 고급 출력(Rich) ON/OFF 토글
+/raw                 → 마지막 응답 raw 출력
 /select_model        → 모델 선택 TUI
 /model <slug>        → 모델 직접 변경
 /all_files           → 파일 선택기(TUI)
 /files f1 f2 ...     → 수동 파일 지정
 /clearfiles          → 첨부파일 초기화
-/mode [dev|general]  → 시스템 프롬프트 모드
-/savefav [name]      → 질문 즐겨찾기
-/usefav [name]       → 즐겨찾기 사용
+/mode <dev|general>  → 시스템 프롬프트 모드
+/savefav <name>      → 질문 즐겨찾기
+/usefav <name>       → 즐겨찾기 사용
 /favs                → 즐겨찾기 목록
 /diffme              → 선택파일 vs GPT 코드 비교
 /diffcode            → 이전↔현재 GPT 코드 비교
@@ -1263,6 +829,19 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 status_text = "[green]활성화[/green]" if pretty_print_enabled else "[yellow]비활성화[/yellow]"
                 console.print(f"고급 출력(Rich) 모드가 {status_text} 되었습니다.")
                 continue
+            elif cmd == "/raw":
+                if last_resp:
+                    # 마지막 응답이 존재하면 Panel 안에 Raw 텍스트를 담아 출력
+                    console.print(Panel(
+                        last_resp,
+                        title="[yellow]마지막 답변 (Raw 포맷)[/yellow]",
+                        border_style="yellow",
+                        title_align="left"
+                    ))
+                else:
+                    # 마지막 응답이 없으면 사용자에게 알림
+                    console.print("[yellow]이전 답변이 없습니다.[/yellow]")
+                continue # 명령어 처리 후 다음 프롬프트로 넘어감
             elif cmd == "/commands":
                 console.print(Panel.fit(COMMANDS, title="[yellow]/명령어[/yellow]"))
             elif cmd == "/select_model":
