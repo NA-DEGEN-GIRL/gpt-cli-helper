@@ -84,40 +84,57 @@ client = OpenAI(
     api_key=OPENROUTER_API_KEY,
     default_headers=DEFAULT_HEADERS,
 )
-                                                                                                 
-def select_model(current: str) -> str:                                                           
-    if not MODELS_FILE.exists():                                                                 
-        console.print(f"[yellow]{MODELS_FILE} 가 없습니다.[/yellow]")                            
-        return current                                                                           
-    models = [                                                                                   
-        line.strip() for line in MODELS_FILE.read_text().splitlines()                            
-        if line.strip() and not line.startswith("#")                                             
-    ]                                                                                            
-    if not models:                                                                               
-        return current                                                                           
-                                                                                                 
-    # 1. 스크롤 맨 위로(커서 홈 + 화면 지우기)                                                   
-    #sys.stdout.write('\033[H\033[2J')                                                            
-    #sys.stdout.flush()                                                                           
-                                                                                                 
-    items = [urwid.Text("모델 선택 (Enter)"), urwid.Divider()]                                   
-    body: List[urwid.Widget] = []                                                                
-    result: List[Optional[str]] = [None]                                                         
-    def raise_exit(val: Optional[str]) -> None:                                                  
-        result[0] = val                                                                          
-        raise urwid.ExitMainLoop()                                                               
-    for m in models:                                                                             
-        disp = m.split("/")[-1]                                                                  
-        btn = urwid.Button(disp)                                                                 
-        urwid.connect_signal(btn, "click", lambda button, model=m: raise_exit(model))            
-        body.append(urwid.AttrMap(btn, None, focus_map="myfocus"))   # myfocus 적용도 가능       
-                                                                                                 
-    listbox = urwid.ListBox(urwid.SimpleFocusListWalker(items + body))                           
-    def unhandled(key: str) -> None:                                                             
-        if key in ("q", "Q"):                                                                    
-            raise_exit(None)                                                                     
-    urwid.MainLoop(listbox, palette=PALETTE, unhandled_input=unhandled).run()                    
-                                                                                                 
+
+def select_model(current: str) -> str:
+    if not MODELS_FILE.exists():
+        console.print(f"[yellow]{MODELS_FILE} 가 없습니다.[/yellow]")
+        return current
+    models = [
+        line.strip() for line in MODELS_FILE.read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    if not models:
+        return current
+
+    # ▼▼▼ 개선점 1: TUI 상단에 현재 모델 정보 표시 ▼▼▼
+    # 'info' 팔레트 스타일을 사용하여 눈에 잘 띄게 합니다.
+    header_text = urwid.Text([
+        "모델 선택 (Enter로 선택, Q로 취소)\n",
+        ("info", f"현재 모델: {current.split('/')[-1]}")
+    ])
+    items = [header_text, urwid.Divider()]
+    
+    body: List[urwid.Widget] = []
+    result: List[Optional[str]] = [None]
+    
+    def raise_exit(val: Optional[str]) -> None:
+        result[0] = val
+        raise urwid.ExitMainLoop()
+
+    for m in models:
+        disp = m.split("/")[-1]
+        
+        # ▼▼▼ 개선점 2: 현재 모델에 시각적 표시 추가 ▼▼▼
+        if m == current:
+            # 현재 선택된 모델은 앞에 화살표를 붙이고 (현재) 텍스트를 추가합니다.
+            label = f"-> {disp} (현재)"
+            # AttrMap을 사용해 다른 색상(예: 'key')으로 강조할 수도 있습니다.
+            # 예: body.append(urwid.AttrMap(btn, 'key', focus_map='myfocus'))
+        else:
+            label = f"   {disp}" # 정렬을 위한 공백 추가
+
+        btn = urwid.Button(label)
+        urwid.connect_signal(btn, "click", lambda button, model=m: raise_exit(model))
+        body.append(urwid.AttrMap(btn, None, focus_map="myfocus"))
+
+    listbox = urwid.ListBox(urwid.SimpleFocusListWalker(items + body))
+    
+    def unhandled(key: str) -> None:
+        if key in ("q", "Q"):
+            raise_exit(None)
+            
+    urwid.MainLoop(listbox, palette=PALETTE, unhandled_input=unhandled).run()
+    
     return result[0] or current
 
 # ────────────────────────────────
