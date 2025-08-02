@@ -564,7 +564,7 @@ class FileSelector:
         ).run() 
         return [str(p) for p in sorted(self.selected) if p.is_file()]
 
-
+    
 # ──────────────────────────────────────────────────────
 # 8. OpenRouter 호출 (스트리밍)
 # ──────────────────────────────────────────────────────
