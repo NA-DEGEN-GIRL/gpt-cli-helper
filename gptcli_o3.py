@@ -7,20 +7,14 @@ import difflib
 import itertools
 import json
 import mimetypes
-import pty                                                                                       
-import os                                                                                        
-import select                                                                                    
-import termios                                                                                   
-import tty                                                                                       
-import subprocess
-import struct                                                                                    
-import fcntl
+import os
 import re
 import sys
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Union  # FileSelector 타입 힌트용
 
 # ── 3rd-party
 import pyperclip
@@ -61,7 +55,6 @@ MODELS_FILE = CONFIG_DIR / "ai_models.txt"
 OUTPUT_DIR.mkdir(exist_ok=True)
 MD_OUTPUT_DIR.mkdir(exist_ok=True)
 
-BLOCK_KEY = "```"
 TRIMMED_HISTORY = 20
 console = Console()
 stop_loading = threading.Event()
@@ -240,10 +233,10 @@ def prepare_content_part(path: Path) -> Dict[str, Any]:
         }
     # plain text
     text = read_plain_file(path)
-    safe_text = mask_sensitive(text)
+    safe_text = text # mask_sensitive(text)
     return {
         "type": "text",
-        "text": f"\n\n[파일: {path}]\n{BLOCK_KEY}\n{safe_text}\n{BLOCK_KEY}",
+        "text": f"\n\n[파일: {path}]\n```\n{safe_text}\n```",
     }
 
 SENSITIVE_KEYS = ["secret", "private", "key", "api"]
@@ -259,6 +252,33 @@ def mask_sensitive(text: str) -> str:
         text = re.sub(pattern, r"\1[REDACTED]", text, flags=re.I)
     return text
 
+def _parse_backticks(line: str) -> Optional[tuple[int, str]]:
+    """
+    주어진 라인이 코드 블록 구분자인지 확인하고, 백틱 개수와 언어 태그를 반환합니다.
+    """
+    stripped_line = line.strip()
+    if not stripped_line.startswith('`'):
+        return None
+
+    count = 0
+    for char in stripped_line:
+        if char == '`':
+            count += 1
+        else:
+            break
+
+    # 최소 3개 이상이어야 유효한 구분자로 간주
+    if count < 3:
+        return None
+
+    # 구분자 뒤에 다른 문자가 있다면 백틱이 아니므로 유효하지 않음
+    if len(stripped_line) > count and stripped_line[count] == '`':
+        return None
+
+    language = stripped_line[count:].strip()
+    return count, language
+
+
 
 # ──────────────────────────────────────────────────────
 # 5. 코드 블록 추출 / 저장
@@ -272,34 +292,37 @@ def extract_code_blocks(markdown: str) -> List[Tuple[str, str]]:
     lines = markdown.split('\n')
     
     in_code_block = False
+    outer_delimiter_len = 0
     nesting_depth = 0
     code_buffer: List[str] = []
     language = ""
     
     for line in lines:
-        stripped_line = line.strip()
+        delimiter_info = _parse_backticks(line)
 
-        # 코드 블록 시작 ``` 감지
-        if stripped_line.startswith(BLOCK_KEY) and not in_code_block:
-            in_code_block = True
-            language = stripped_line[len(BLOCK_KEY):].strip() or "text"
-            nesting_depth = 0
-            code_buffer = []  # 새 블록을 위해 버퍼 초기화
-        
-        # 코드 블록 종료 ``` 감지
-        elif in_code_block:
+        # 코드 블록 시작 
+        if not in_code_block:
+            if delimiter_info:
+                in_code_block = True
+                outer_delimiter_len, language = delimiter_info
+                nesting_depth = 0
+                code_buffer = []
             
-            if stripped_line.startswith(BLOCK_KEY):
-                if stripped_line[len(BLOCK_KEY):].strip():
+        # 코드 블록 종료 
+        else:
+            is_matching_delimiter = delimiter_info and delimiter_info[0] == outer_delimiter_len
+
+            if is_matching_delimiter:
+                # 같은 길이의 백틱 구분자. 중첩 여부 판단.
+                if delimiter_info[1]: # 언어 태그가 있으면 중첩 시작
                     nesting_depth += 1
-                else:
+                else: # 언어 태그가 없으면 중첩 종료
                     nesting_depth -= 1
-            
+
             if nesting_depth < 0:
+                # 최종 블록 종료
                 blocks.append((language, "\n".join(code_buffer)))
                 in_code_block = False
-                nesting_depth = 0
-                language = ""
             else:
                 code_buffer.append(line)
 
@@ -659,6 +682,7 @@ def ask_stream(
     normal_buffer, last_flush_time = "", time.time()
     reasoning_buffer = ""
     
+    outer_delimiter_len = 0
     nesting_depth = 0
 
     console.print(f"[bold]{model}:[/bold]")
@@ -701,16 +725,19 @@ def ask_stream(
 
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
-                stripped_line = line.strip()
+
+                delimiter_info = _parse_backticks(line)
 
                 if not in_code_block:
-                    if stripped_line.startswith(BLOCK_KEY):
-                        if normal_buffer: console.print(normal_buffer, end="", markup=False); normal_buffer = ""
+                    if delimiter_info:
+                        if normal_buffer: 
+                            console.print(normal_buffer, end="", markup=False)
+                            normal_buffer = ""
                         
                         in_code_block = True
-                        language = stripped_line[len(BLOCK_KEY):] or "text"
-                        code_buffer = ""
+                        outer_delimiter_len, language = delimiter_info
                         nesting_depth = 0
+                        code_buffer = ""
                         
                         live = Live(console=console, auto_refresh=True, refresh_per_second=5)
                         with live:
@@ -733,25 +760,31 @@ def ask_stream(
                                         
                                         while "\n" in buffer:
                                             sub_line, buffer = buffer.split("\n", 1)
-                                            sub_stripped = sub_line.strip()
-                                            if sub_stripped.startswith(BLOCK_KEY):
-                                                if sub_stripped[len(BLOCK_KEY):].strip():
+                                            sub_delimiter_info = _parse_backticks(sub_line)
+                                            is_matching = sub_delimiter_info and sub_delimiter_info[0] == outer_delimiter_len
+
+                                            if is_matching:
+                                                if sub_delimiter_info[1]:
                                                     nesting_depth += 1
                                                 else:
                                                     nesting_depth -= 1
+
                                             if nesting_depth < 0:
-                                                in_code_block = False; break
+                                                in_code_block = False
+                                                break
                                             else:
                                                 code_buffer += sub_line +"\n"
 
                                         
-                                        if not in_code_block: break
+                                        if not in_code_block: 
+                                            break
+
                                 except StopIteration:
-                                    in_code_block = False; break
+                                    in_code_block = False
+                                    break
                             
                             if code_buffer.rstrip():
                                 syntax_block = Syntax(code_buffer.rstrip(), language, theme="monokai", line_numbers=True, word_wrap=True)
-                                # 바로 이 부분을 Panel.fit() 으로 수정했습니다.
                                 final_panel = Panel.fit(syntax_block, title=f"[green]코드 ({language})[/green]", border_style="green")
                                 live.update(final_panel)
                             else:
@@ -848,12 +881,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
             elif cmd == "/raw":
                 if last_resp:
                     # 마지막 응답이 존재하면 Panel 안에 Raw 텍스트를 담아 출력
-                    console.print(Panel(
-                        last_resp,
-                        title="[yellow]마지막 답변 (Raw 포맷)[/yellow]",
-                        border_style="yellow",
-                        title_align="left"
-                    ))
+                    console.print(last_resp)
                 else:
                     # 마지막 응답이 없으면 사용자에게 알림
                     console.print("[yellow]이전 답변이 없습니다.[/yellow]")
@@ -864,7 +892,11 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 #console.print()
                 old_model = model                                                                            
                 model = select_model(model)
-                console.print(f"[green]모델 변경: {old_model} → 현재: {model}[/green]")
+                if model != old_model:
+                    save_session(name, messages, model)
+                    console.print(f"[green]모델 변경: {old_model} → 현재: {model}[/green]")
+                else:
+                    console.print(f"[green]모델 변경없음: {model}[/green]")
                 #console.print()
             elif cmd == "/all_files":
                 selector = FileSelector()
@@ -964,7 +996,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 console.print("[yellow]클립보드 실패[/yellow]")
 
         
-        MD_OUTPUT_DIR.joinpath(f"response_{len(messages)//2}.md").write_text(reply)
+        MD_OUTPUT_DIR.joinpath(f"response_{len(messages)//2}.md").write_text(reply, encoding="utf-8")
 
         # 자동 초기화
         if attached:
