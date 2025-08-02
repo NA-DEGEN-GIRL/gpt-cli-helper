@@ -1002,6 +1002,7 @@ def ask_stream(
     messages: List[Dict[str, Any]],
     model: str,
     mode: str,
+    pretty_print: bool = True
 ) -> Optional[str]:
     console.print(Syntax(" ", "python", theme="monokai", background_color="#008C45"))
     console.print(Syntax(" ", "python", theme="monokai", background_color="#F4F5F0"))
@@ -1063,6 +1064,22 @@ def ask_stream(
         except OpenAIError as e:
             console.print(f"[red]API 오류: {e}[/red]")
             return None
+
+    if not pretty_print:
+        full_reply = ""
+        console.print(f"[bold]{model}:[/bold]")
+        try:
+            for chunk in stream:
+                if chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_reply += content
+                    # 서식 없이 그대로 출력
+                    console.print(content, end="", markup=False)
+        except StopIteration:
+            pass
+        finally:
+            console.print()  # 마지막 줄바꿈
+        return full_reply
 
     # 상태 머신 변수 초기화
     full_reply = ""
@@ -1198,6 +1215,7 @@ prompt_session = PromptSession(
 # ──────────────────────────────────────────────────────
 COMMANDS = """
 /commands            → 명령어 리스트
+/pretty_print        → 고급 출력(Rich) ON/OFF 토글
 /select_model        → 모델 선택 TUI
 /model <slug>        → 모델 직접 변경
 /all_files           → 파일 선택기(TUI)
@@ -1221,6 +1239,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
     mode = "dev"
     attached: List[str] = []
     last_resp = ""
+    pretty_print_enabled = True 
 
     console.print(Panel.fit(COMMANDS, title="[yellow]/명령어[/yellow]"))
     console.print(f"[cyan]세션('{name}') 시작 – 모델: {model}[/cyan]")
@@ -1239,7 +1258,12 @@ def chat_mode(name: str, copy_clip: bool) -> None:
             cmd, *args = user_in.split()
             if cmd == "/exit":
                 break
-            if cmd == "/commands":
+            if cmd == "/pretty_print":
+                pretty_print_enabled = not pretty_print_enabled
+                status_text = "[green]활성화[/green]" if pretty_print_enabled else "[yellow]비활성화[/yellow]"
+                console.print(f"고급 출력(Rich) 모드가 {status_text} 되었습니다.")
+                continue
+            elif cmd == "/commands":
                 console.print(Panel.fit(COMMANDS, title="[yellow]/명령어[/yellow]"))
             elif cmd == "/select_model":
                 #console.print()
@@ -1313,7 +1337,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
         messages.append(msg_obj)
 
         # ── OpenRouter 호출
-        reply = ask_stream(messages, model, mode)
+        reply = ask_stream(messages, model, mode, pretty_print=pretty_print_enabled)
         if reply is None:
             messages.pop()  # 실패 시 user message 제거
             continue
