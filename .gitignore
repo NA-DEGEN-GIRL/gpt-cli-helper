@@ -4,3 +4,5 @@ gpt*/
 test*/
 .gpt*
 .gptignore
+.gpt_sessions
+.venv

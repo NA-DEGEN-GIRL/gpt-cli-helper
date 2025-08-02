@@ -2,3 +2,7 @@ openai
 python-dotenv
 rich
 pyperclip
+urwid
+pathspec
+prompt_toolkit
+requests
