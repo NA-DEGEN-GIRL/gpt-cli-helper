@@ -972,20 +972,35 @@ def single_prompt(text: str) -> None:
 # main
 # ────────────────────────────────
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("prompt", nargs="?", help="단일 프롬프트")
-    ap.add_argument("-s", "--session", default="default", help="세션 이름")
-    ap.add_argument("--copy", action="store_true", help="응답 클립보드 복사")
+    ap = argparse.ArgumentParser(
+        description="터미널에서 AI와 상호작용하는 CLI 도구",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    ap.add_argument("prompt", nargs="?", default=None, help="단일 질문을 입력하고 바로 답변을 받습니다.")
+    ap.add_argument("-s", "--session", default="default", help="대화형 모드에서 사용할 세션 이름 (기본값: default)")
+    ap.add_argument("--copy", action="store_true", help="대화형 모드에서 AI의 응답을 클립보드로 복사합니다.")
+    ap.add_argument("--model", default="openai/gpt-4o", help="단일 프롬프트 모드에서 사용할 모델 (기본값: openai/gpt-4o)")
     args = ap.parse_args()
 
+    # 인자로 프롬프트가 주어진 경우 -> 단일 실행 모드
     if args.prompt:
-        # single-prompt mode (기존 chat_mode 내부 함수 활용)
-        chat_mode = globals()["chat_mode"]  # noqa
-        chat_mode(args.session, False)  # quick path
-    else:
-        chat_mode = globals()["chat_mode"]  # noqa
-        chat_mode(args.session, args.copy)
+        console.print(f"[dim]모델: {args.model}...[/dim]")
+        # 메시지 객체 생성
+        messages = [{"role": "user", "content": args.prompt}]
+        
+        # 스트리밍 호출 및 답변 출력
+        reply = ask_stream(messages, args.model, "general", pretty_print=True)
+        
+        # 답변을 파일로 저장 (선택적)
+        if reply:
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            MD_OUTPUT_DIR.joinpath(f"single_prompt_{timestamp}.md").write_text(reply, encoding="utf-8")
+        
+        sys.exit(0) # 실행 후 즉시 종료
 
+    # 인자로 프롬프트가 없는 경우 -> 대화형 채팅 모드
+    else:
+        chat_mode(args.session, args.copy)
 
 if __name__ == "__main__":
     main()
