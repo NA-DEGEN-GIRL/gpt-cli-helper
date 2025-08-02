@@ -138,7 +138,6 @@ gptcli "React에서 상태 관리를 위한 최고의 라이브러리는?" --mod
 | `/pretty_print` | 고급 출력(Rich)과 순수 텍스트(Raw) 모드를 전환합니다. | `/pretty_print` |
 | `/raw` | 마지막 답변을 서식 없는 순수 텍스트로 다시 출력합니다. | `/raw` |
 | `/select_model` | `ai_models.txt` 기반의 TUI 모델 선택기를 엽니다. | `/select_model` |
-| `/model <slug>` | 모델을 직접 변경합니다. | `/model openai/gpt-4o` |
 | `/all_files` | TUI 파일 선택기를 열어 컨텍스트에 추가할 파일을 선택합니다. | `/all_files` |
 | `/files <paths>` | 공백으로 구분하여 파일 경로를 직접 지정합니다. | `/files main.py` |
 | `/clearfiles` | 현재 첨부된 모든 파일을 초기화합니다. | `/clearfiles` |

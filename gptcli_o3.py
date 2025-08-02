@@ -265,7 +265,7 @@ def extract_code_blocks(markdown: str) -> List[Tuple[str, str]]:
         # 코드 블록 시작 ``` 감지
         if stripped_line.startswith(BLOCK_KEY) and not in_code_block:
             in_code_block = True
-            language = line.strip()[len(BLOCK_KEY):].strip() or "text"
+            language = stripped_line[len(BLOCK_KEY):].strip() or "text"
             nesting_depth = 0
             code_buffer = []  # 새 블록을 위해 버퍼 초기화
         
@@ -636,7 +636,7 @@ def ask_stream(
 
     # 상태 머신 변수 초기화
     full_reply = ""
-    current_state = "NORMAL"
+    in_code_block = False
     buffer = ""
     code_buffer, language = "", "text"
     normal_buffer, last_flush_time = "", time.time()
@@ -686,18 +686,18 @@ def ask_stream(
                 line, buffer = buffer.split("\n", 1)
                 stripped_line = line.strip()
 
-                if current_state == "NORMAL":
+                if not in_code_block:
                     if stripped_line.startswith(BLOCK_KEY):
                         if normal_buffer: console.print(normal_buffer, end="", markup=False); normal_buffer = ""
                         
-                        current_state = "IN_CODE"
-                        language = line.strip()[len(BLOCK_KEY):] or "text"
+                        in_code_block = True
+                        language = stripped_line[len(BLOCK_KEY):] or "text"
                         code_buffer = ""
                         nesting_depth = 0
                         
                         live = Live(console=console, auto_refresh=True, refresh_per_second=5)
                         with live:
-                            while current_state == "IN_CODE":
+                            while in_code_block:
                                 lines, total_lines = code_buffer.splitlines(), len(code_buffer.splitlines())
                                 panel_height, display_height = 12, 10
                                 
@@ -723,14 +723,14 @@ def ask_stream(
                                                 else:
                                                     nesting_depth -= 1
                                             if nesting_depth < 0:
-                                                current_state = "NORMAL"; break
+                                                in_code_block = False; break
                                             else:
                                                 code_buffer += sub_line +"\n"
 
                                         
-                                        if current_state == "NORMAL": break
+                                        if not in_code_block: break
                                 except StopIteration:
-                                    current_state = "NORMAL"; break
+                                    in_code_block = False; break
                             
                             if code_buffer.rstrip():
                                 syntax_block = Syntax(code_buffer.rstrip(), language, theme="monokai", line_numbers=True, word_wrap=True)
@@ -744,7 +744,7 @@ def ask_stream(
                     else:
                         normal_buffer += line + "\n"
 
-            if current_state == "NORMAL" and buffer:
+            if not in_code_block and buffer:
                 normal_buffer += buffer; buffer = ""
             
             current_time = time.time()
@@ -756,7 +756,7 @@ def ask_stream(
         pass
 
     if normal_buffer: console.print(normal_buffer, end="", markup=False)
-    if current_state == "IN_CODE" and code_buffer:
+    if in_code_block and code_buffer:
         console.print("\n[yellow]경고: 코드 블록이 제대로 닫히지 않았습니다.[/yellow]")
         console.print(Syntax(code_buffer.rstrip(), language, theme="monokai", line_numbers=True))
 
@@ -783,7 +783,6 @@ COMMANDS = """
 /pretty_print        → 고급 출력(Rich) ON/OFF 토글
 /raw                 → 마지막 응답 raw 출력
 /select_model        → 모델 선택 TUI
-/model <slug>        → 모델 직접 변경
 /all_files           → 파일 선택기(TUI)
 /files f1 f2 ...     → 수동 파일 지정
 /clearfiles          → 첨부파일 초기화
@@ -850,9 +849,6 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 model = select_model(model)
                 console.print(f"[green]모델 변경: {old_model} → 현재: {model}[/green]")
                 #console.print()
-            elif cmd == "/model" and args:
-                model = args[0]
-                console.print(f"[green]모델 변경 → {model}[/green]")
             elif cmd == "/all_files":
                 selector = FileSelector()
                 attached = selector.start()
