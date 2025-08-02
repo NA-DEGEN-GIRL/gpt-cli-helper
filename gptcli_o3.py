@@ -914,7 +914,24 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 console.print("[yellow]세션 초기화[/yellow]")
             elif cmd == "/savefav" and args:
                 if messages and messages[-1]["role"] == "user":
-                    save_favorite(args[0], messages[-1]["content"])
+                    content = messages[-1]["content"]
+                    
+                    # content가 리스트(멀티파트 메시지)인 경우, 텍스트 부분만 추출
+                    if isinstance(content, list):
+                        text_parts = [part["text"] for part in content if part.get("type") == "text"]
+                        # 텍스트가 여러 개 있을 수 있으므로 공백으로 합침
+                        content_to_save = " ".join(text_parts).strip()
+                    else:
+                        # 기존 로직 (content가 문자열인 경우)
+                        content_to_save = content
+
+                    if content_to_save:
+                        save_favorite(args[0], content_to_save)
+                        console.print(f"[green]'{args[0]}' 즐겨찾기 저장 완료: \"{content_to_save[:50]}...\"[/green]")
+                    else:
+                        console.print("[yellow]즐겨찾기에 저장할 텍스트 내용이 없습니다.[/yellow]")
+                else:
+                    console.print("[yellow]저장할 사용자 질문이 없습니다.[/yellow]")
             elif cmd == "/usefav" and args:
                 fav = load_favorites().get(args[0])
                 if fav:
@@ -995,8 +1012,22 @@ def chat_mode(name: str, copy_clip: bool) -> None:
             except pyperclip.PyperclipException:
                 console.print("[yellow]클립보드 실패[/yellow]")
 
-        
-        MD_OUTPUT_DIR.joinpath(f"response_{len(messages)//2}.md").write_text(reply, encoding="utf-8")
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        safe_session_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+        md_filename = f"{safe_session_name}_{timestamp}_{len(messages)//2}.md"
+        saved_path = MD_OUTPUT_DIR.joinpath(md_filename)
+        try:
+            saved_path.write_text(reply, encoding="utf-8")
+            display_path_str = str(saved_path.relative_to(BASE_DIR))
+            console.print(Panel.fit(
+                    Text(display_path_str),
+                    title="[green]💾 응답 파일 저장 완료[/green]",
+                    border_style="dim",
+                    title_align="left"
+                ))
+        except Exception as e:
+            console.print(f"[red]마크다운 파일 저장 실패 ({md_filename}): {e}[/red]") 
+
 
         # 자동 초기화
         if attached:
