@@ -155,23 +155,19 @@ python gptcli_o3.py "파이썬에서 리스트의 중복 요소를 제거하는 
 
 ```
 명령어              설명                                                       예시
-─────────────────── ────────────────────────────────────────────────────────── 
-────────────────────────
+─────────────────── ────────────────────────────────────────────────────────── ─────────────────────────
 /commands           사용 가능한 모든 명령어 목록을 표시합니다.                 /commands
 /pretty_print       고급 출력(Rich)과 순수 텍스트(Raw) 모드를 전환합니다.      /pretty_print
 /select_model       `ai_models.txt` 기반의 TUI 모델 선택기를 엽니다.           /select_model
-/model <slug>       모델을 직접 변경합니다.                                    /model 
-openai/gpt-4o
+/model <slug>       모델을 직접 변경합니다.                                    /model openai/gpt-4o
 /all_files          TUI 파일 선택기를 열어 컨텍스트에 추가할 파일을 선택합니다. /all_files
-/files <f1> <f2>    공백으로 구분하여 파일 경로를 직접 지정합니다.             /files main.py 
-utils.py
+/files <f1> <f2>    공백으로 구분하여 파일 경로를 직접 지정합니다.             /files main.py utils.py
 /clearfiles         현재 첨부된 모든 파일을 초기화합니다.                      /clearfiles
 /mode <mode>        AI의 페르소나를 `dev` 또는 `general`로 변경합니다.         /mode dev
-/savefav <name>     마지막 질문을 즐겨찾기에 저장합니다.                       /savefav 
-python-dedup
+/savefav <name>     마지막 질문을 즐겨찾기에 저장합니다.                       /savefav python-dedup
 /usefav <name>      저장된 즐겨찾기 질문을 불러와 입력합니다.                  /usefav python-dedup
 /favs               저장된 모든 즐겨찾기 목록을 출력합니다.                    /favs
-/diffme             첨부된 파일과 AI의 마지막 응답 코드 간의 차이를 비교합니다. /diffme
+/diffme             첨부된 파일과 AI의 응답 코드 간의 차이를 비교합니다.       /diffme
 /diffcode           이전 AI 응답과 현재 응답의 코드 블록 간 차이를 비교합니다. /diffcode
 /reset              현재 세션의 모든 대화 내역을 삭제합니다.                   /reset
 /exit               프로그램을 종료합니다.                                     /exit
