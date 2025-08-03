@@ -25,6 +25,10 @@ from pathspec import PathSpec
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.completion import Completer, PathCompleter, WordCompleter, FuzzyCompleter, Completion
+from prompt_toolkit.document import Document
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.filters import Condition
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
@@ -77,6 +81,40 @@ client = OpenAI(
     api_key=OPENROUTER_API_KEY,
     default_headers=DEFAULT_HEADERS,
 )
+class ConditionalCompleter(Completer):
+    """
+    모든 문제를 해결한, 최종 버전의 '지능형' 자동 완성기.
+    """
+    def __init__(self, command_completer: Completer, file_completer: Completer):
+        self.command_completer = command_completer
+        self.file_completer = file_completer
+        self.attached_completer: Optional[Completer] = None  
+    
+    def update_attached_file_completer(self, attached_filenames: List[str]):
+        if attached_filenames:
+            self.attached_completer =  FuzzyCompleter(WordCompleter(attached_filenames, ignore_case=True))
+        else:
+            self.attached_completer = None
+
+    def get_completions(self, document: Document, complete_event):
+        text = document.text_before_cursor
+        stripped_text = text.lstrip()
+
+        # 경우 1: 경로 완성이 필요한 경우
+        if stripped_text.startswith('/files '):
+            yield from self.file_completer.get_completions(document, complete_event)
+
+        # 경우 2: 명령어 완성이 필요한 경우
+        elif stripped_text.startswith('/') and ' ' not in stripped_text:
+            yield from self.command_completer.get_completions(document, complete_event)
+
+        # 경우 3: 그 외 (일반 질문 시 '첨부 파일 이름' 완성 시도)
+        else:
+            word = document.get_word_before_cursor(WORD=True)
+            if word and self.attached_completer:
+                yield from self.attached_completer.get_completions(document, complete_event)
+            else:
+                yield from []
 
 def select_model(current: str) -> str:
     if not MODELS_FILE.exists():
@@ -856,15 +894,60 @@ def chat_mode(name: str, copy_clip: bool) -> None:
     last_resp = ""
     pretty_print_enabled = True 
 
+    # 1. 기본 명령어 자동 완성기 생성
+    command_list = [cmd.split()[0] for cmd in COMMANDS.strip().split('\n')]
+    command_completer = FuzzyCompleter(WordCompleter(command_list, ignore_case=True))
+
+    # 1-2. .gptignore를 존중하는 파일 목록 생성 -> 파일 완성기
+    spec = ignore_spec()
+    try:
+        file_list = [p.name for p in BASE_DIR.iterdir() if not is_ignored(p, spec)]
+    except Exception:
+        file_list = []
+    file_completer = FuzzyCompleter(WordCompleter(file_list, ignore_case=True))
+
+    # ConditionalCompleter 생성 (초기에는 첨부 파일 완성기가 비어있음)
+    conditional_completer = ConditionalCompleter(
+        command_completer=command_completer,
+        file_completer=file_completer
+    )
+
+    # 키 바인딩 준비
+    key_bindings = KeyBindings()
+    session = PromptSession() # session 객체를 먼저 생성해야 filter에서 참조 가능
+
+    @key_bindings.add("enter", filter=Condition(lambda: session.default_buffer.complete_state is not None))
+    def _(event):
+        complete_state = event.current_buffer.complete_state
+        if complete_state:
+            if complete_state.current_completion:
+                event.current_buffer.apply_completion(complete_state.current_completion)
+            elif complete_state.completions:
+                event.current_buffer.apply_completion(complete_state.completions[0])
+
+    # 최종 PromptSession 설정
+    session.history = FileHistory(PROMPT_HISTORY_FILE)
+    session.auto_suggest = AutoSuggestFromHistory()
+    session.multiline = True
+    session.prompt_continuation = "          "
+    session.completer = conditional_completer
+    session.key_bindings = key_bindings
+    session.complete_while_typing = True
+
     console.print(Panel.fit(COMMANDS, title="[yellow]/명령어[/yellow]"))
     console.print(f"[cyan]세션('{name}') 시작 – 모델: {model}[/cyan]")
 
     while True:
         try:
-            user_in = prompt_session.prompt("Question> ").strip()
+            # ✅ 루프 시작 시, 최신 'attached' 목록으로 completer를 업데이트!
+            attached_filenames = [Path(p).name for p in attached]
+            conditional_completer.update_attached_file_completer(attached_filenames)
+
+            user_in = session.prompt("Question> ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print()
             break
+
         if not user_in:
             continue
 
