@@ -4,12 +4,15 @@
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Status](https://img.shields.io/badge/status-active-success.svg)
 
-**GPT-CLI Pro**는 터미널 환경에서 AI의 능력을 최대한으로 활용하고자 하는 개발자와 파워 유저를 위한 차세대 명령줄 인터페이스입니다. 단순한 질의응답을 넘어, **파일 시스템 연동, 고급 자동 완성, 멀티모달 지원, 전역/지역 설정 분리** 등 개발 생산성을 극대화하는 강력한 기능들을 탑재했습니다.
+**GPT-CLI Pro**는 터미널 환경에서 AI의 능력을 최대한으로 활용하고자 하는 개발자와 파워 유저를 위한 차세대 명령줄 인터페이스입니다. 이 프로젝트는 **[OpenRouter](https://openrouter.ai/)를 핵심 API 게이트웨이로 활용**하여, Claude 3.5 Sonnet, GPT-4o, Llama 3 등 수십 개의 최신 LLM을 단일 API 키로 접근하고 전환할 수 있습니다.
+
+단순한 질의응답을 넘어, **파일 시스템 연동, 고급 자동 완성, 멀티모달 지원, 전역/지역 설정 분리** 등 개발 생산성을 극대화하는 강력한 기능들을 탑재했습니다.
 
 ---
 
 ## ✨ 주요 기능 (Key Features)
 
+*   **🌐 다양한 AI 모델 접근 (Powered by OpenRouter)**: 하나의 API 엔드포인트와 키로 GPT, Claude, Llama 등 수십 가지의 경쟁력 있는 모델을 자유롭게 선택하고 테스트할 수 있습니다.
 *   **💻 전역 명령어 지원**: 터미널이 열려 있는 어느 경로에서든 `gptcli` 와 같은 단축 명령어로 즉시 실행할 수 있습니다.
 *   **⚙️ 중앙 설정 관리**: `~/codes/gpt_cli` 디렉토리에서 전역으로 사용할 AI 모델 목록(`ai_models.txt`)과 기본 무시 패턴(`.gptignore_default`)을 관리하여 모든 프로젝트에서 일관된 환경을 제공합니다.
 *   **⚡ 실시간 스트리밍 렌더링**: AI의 답변이 생성되는 과정을 실시간으로 확인하며, `rich` 라이브러리를 통해 아름답게 렌더링된 마크다운 및 코드 블록을 제공합니다.
@@ -25,7 +28,7 @@
 *   **📄 출력 제어**:
     *   `/pretty_print`: **고급 출력(Rich)**과 **순수 텍스트(Raw)** 모드를 실시간으로 토글합니다.
     *   `/raw`: 고급 모드로 답변을 받은 후에도, 마지막 답변의 원본(Raw) 텍스트를 즉시 다시 볼 수 있습니다.
-*   **🖼️ 멀티모달 지원**: 텍스트뿐만 아니라 **이미지(.png, .jpg), PDF 문서** 파일을 첨부하여 시각적 컨텍스트를 포함한 질문이 가능합니다.
+*   **🖼️ 멀티모달 지원**: 텍스트뿐만 아니라 **이미지(.png, .jpg), PDF 문서** 파일을 첨부하여 시각적 컨텍스트를 포함한 질문이 가능합니다. (OpenRouter에서 지원하는 모델에 한함)
 *   **↔️ 코드 비교 (Diff)**: 로컬 파일과 AI가 생성한 코드를 즉시 비교하거나, 이전 응답과 현재 응답 간의 코드 변경점을 추적할 수 있습니다.
 *   **🔄 세션 관리**: 이름 기반으로 여러 대화 세션을 관리하고, `/mode` 명령어를 통해 모드와 세션을 유연하게 전환할 수 있습니다.
 
@@ -65,7 +68,7 @@ pip install -r requirements.txt
 
 2.  **전역 설정 파일 자동 생성 (최초 1회 실행)**:
     `gptcli`를 처음 실행하면, **전역 설정 디렉토리(`~/.config/gpt_cli`)** 와 함께 아래의 필수 설정 파일들이 **자동으로 생성**됩니다. 사용자는 이 파일들의 존재를 신경 쓸 필요 없이 바로 프로그램을 사용할 수 있으며, 필요 시에만 수정하면 됩니다.
-    *   `~/codes/gpt_cli/ai_models.txt`: TUI 모델 선택기에서 사용할 모델 목록, OpenRouter docs 참조
+    *   `~/codes/gpt_cli/ai_models.txt`: TUI 모델 선택기에서 사용할 모델 목록. [OpenRouter 모델 목록](https://openrouter.ai/models)을 참조하여 원하는 모델을 추가하세요.
     *   `~/codes/gpt_cli/.gptignore_default`: 모든 프로젝트에 공통으로 적용될 기본 무시 패턴
 
     만약 수동으로 생성하고 싶다면 아래 명령어를 사용할 수 있습니다.
@@ -102,8 +105,8 @@ pip install -r requirements.txt
 
 ## 📝 프로젝트별 환경 설정
 
-### .env 파일 (API 키 관리)
-프로젝트 루트에 `.env` 파일을 만들어 `OPENROUTER_API_KEY`를 설정합니다. 이 파일은 `.gitignore`에 추가하는 것을 강력히 권장합니다.
+### .env 파일 (OpenRouter API 키 관리)
+이 프로젝트는 **OpenRouter**를 API 게이트웨이로 사용합니다. [OpenRouter 웹사이트](https://openrouter.ai/)에서 가입 후 API 키를 발급받아, 프로젝트 루트에 `.env` 파일을 만들어 `OPENROUTER_API_KEY`를 설정하세요. 이 파일은 `.gitignore`에 추가하는 것을 강력히 권장합니다.
 
 ```env
 # .env
@@ -175,7 +178,10 @@ gptcli "React 상태 관리 라이브러리 추천해줘" --model anthropic/clau
 
 ## 🛠️ 기술 스택 (Tech Stack)
 
-*   **API 클라이언트**: [openai-python](https://github.com/openai/openai-python)
+*   **핵심 API 게이트웨이**:
+    *   [OpenRouter](https://openrouter.ai/): 다양한 LLM 모델(GPT, Claude, Llama 등)에 대한 단일 액세스 포인트 제공
+*   **API 클라이언트 라이브러리**:
+    *   [openai-python](https://github.com/openai/openai-python): OpenRouter의 OpenAI 호환 엔드포인트와 통신하기 위해 사용
 *   **UI / 렌더링**:
     *   [Rich](https://github.com/Textualize/rich): 아름다운 터미널 UI 및 마크다운/코드 렌더링
     *   [Urwid](https://github.com/urwid/urwid): TUI 파일/모델 선택기 구현
