@@ -9,10 +9,6 @@
 멀티모달 지원, 실시간 코드 렌더링, 전역 설정 관리** 등 강력한 기능들을 통해 개발 생산성을 
 극대화합니다.
 
-![GPT-CLI Pro 
-데모](https://user-images.githubusercontent.com/username/repo/assets/demo.gif)
-_TUI 파일 선택기, 실시간 스트리밍, 코드 Diff 등 주요 기능 데모_
-
 ---
 
 ## ✨ 주요 기능 (Key Features)
