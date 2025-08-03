@@ -70,6 +70,7 @@ IGNORE_FILE = BASE_DIR / ".gptignore"
 OUTPUT_DIR = BASE_DIR / "gpt_outputs"
 MD_OUTPUT_DIR = BASE_DIR / "gpt_markdowns"
 MODELS_FILE = CONFIG_DIR / "ai_models.txt"
+DEFAULT_IGNORE_FILE = CONFIG_DIR / ".gptignore_default"
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 MD_OUTPUT_DIR.mkdir(exist_ok=True)
@@ -108,6 +109,69 @@ def get_session_names() -> List[str]:
         names.append(name_part)
     return sorted(names)
 
+class PathCompleterWrapper(Completer):
+    """
+    PathCompleter를 /files 명령어에 맞게 감싸는 최종 완성 버전.
+    스페이스로 구분된 여러 파일 입력을 완벽하게 지원합니다.
+    """
+    def __init__(self, command_prefix: str, path_completer: Completer):
+        self.command_prefix = command_prefix
+        self.path_completer = path_completer
+
+    def get_completions(self, document: Document, complete_event):
+        # 1. 사용자가 "/files " 뒤에 있는지 확인합니다.
+        #    커서 위치가 명령어 길이보다 짧으면 자동 완성을 시도하지 않습니다.
+        if document.cursor_position < len(self.command_prefix):
+            return
+
+        # 2. 커서 바로 앞의 '단어'를 가져옵니다. 이것이 핵심입니다.
+        # WORD=True 인자는 슬래시(/)나 점(.)을 단어의 일부로 인식하게 합니다.
+        # 예: "/files main.py src/co" -> "src/co"
+        word_before_cursor = document.get_word_before_cursor(WORD=True)
+
+        # 3. 만약 단어가 없다면 (예: "/files main.py ") 아무것도 하지 않습니다.
+        #if not word_before_cursor:
+        #    return
+
+        # 4. '현재 단어'만을 내용으로 하는 가상의 Document 객체를 만듭니다.
+        doc_for_path = Document(
+            text=word_before_cursor,
+            cursor_position=len(word_before_cursor)
+        )
+
+        # 5. 이 가상 문서를 PathCompleter에게 전달합니다.
+        #    PathCompleter는 이제 'src/co'에 대한 제안('src/components/')을 올바르게 생성합니다.
+        yield from self.path_completer.get_completions(doc_for_path, complete_event)
+
+
+class AttachedFileCompleter(Completer):
+    """
+    오직 '첨부된 파일 목록' 내에서만 경로 자동완성을 수행하는 전문 Completer.
+    WordCompleter가 겪는 경로 관련 '단어' 인식 문제를 완벽히 해결합니다.
+    """
+    def __init__(self, attached_relative_paths: List[str]):
+        self.attached_paths = sorted(list(set(attached_relative_paths)))
+
+    def get_completions(self, document: Document, complete_event):
+        # 1. 사용자가 현재 입력 중인 '단어'를 가져옵니다. (WORD=True로 경로 문자 인식)
+        word_before_cursor = document.get_word_before_cursor(WORD=True)
+        
+        if not word_before_cursor:
+            return
+
+        # 2. 첨부된 모든 경로 중에서, 현재 입력한 단어로 '시작하는' 경로를 모두 찾습니다.
+        for path in self.attached_paths:
+            if path.startswith(word_before_cursor):
+                # 3. 찾은 경로를 Completion 객체로 만들어 반환합니다.
+                #    start_position=-len(word_before_cursor) 는
+                #    '현재 입력 중인 단어 전체를 이 completion으로 교체하라'는 의미입니다.
+                #    이것이 이 문제 해결의 핵심입니다.
+                yield Completion(
+                    path,
+                    start_position=-len(word_before_cursor),
+                    display_meta="[첨부됨]"
+                )
+
 class ConditionalCompleter(Completer):
     """
     모든 문제를 해결한, 최종 버전의 '지능형' 자동 완성기.
@@ -132,7 +196,27 @@ class ConditionalCompleter(Completer):
     
     def update_attached_file_completer(self, attached_filenames: List[str]):
         if attached_filenames:
-            self.attached_completer =  FuzzyCompleter(WordCompleter(attached_filenames, ignore_case=True))
+            try:
+                # 1. 자동완성 후보가 될 상대 경로 리스트를 생성합니다.
+                relative_paths = [
+                    str(Path(p).relative_to(BASE_DIR)) for p in attached_filenames
+                ]
+                
+                # 2. WordCompleter 대신, 우리가 만든 AttachedFileCompleter를 사용합니다.
+                self.attached_completer = AttachedFileCompleter(relative_paths)
+
+            except ValueError:
+                # BASE_DIR 외부 경로 등 예외 발생 시, 전체 경로를 사용
+                self.attached_completer = AttachedFileCompleter(attached_filenames)
+            '''
+            relative_paths = [
+                str(Path(p).relative_to(BASE_DIR)) for p in attached_filenames
+            ]
+            self.attached_completer =  FuzzyCompleter(
+                WordCompleter(relative_paths, ignore_case=True)
+            )
+            '''
+            #self.attached_completer =  FuzzyCompleter(WordCompleter(attached_filenames, ignore_case=True))
         else:
             self.attached_completer = None
 
@@ -275,14 +359,31 @@ def save_favorite(name: str, prompt: str) -> None:
     save_json(FAVORITES_FILE, favs)
 
 
-# .gptignore
 def ignore_spec() -> Optional[PathSpec]:
-    return (
-        PathSpec.from_lines("gitwildmatch", IGNORE_FILE.read_text().splitlines())
-        if IGNORE_FILE.exists()
-        else None
-    )
+    """
+    전역(.gptignore_default) 및 프로젝트별(.gptignore) 무시 규칙을
+    결합하여 최종 PathSpec 객체를 생성합니다.
+    """
+    default_patterns = []
+    if DEFAULT_IGNORE_FILE.exists():
+        default_patterns = DEFAULT_IGNORE_FILE.read_text().splitlines()
 
+    user_patterns = []
+    if IGNORE_FILE.exists():
+        user_patterns = IGNORE_FILE.read_text().splitlines()
+    
+    # 1. 전역 규칙과 프로젝트 규칙을 합치고, set으로 중복을 제거합니다.
+    combined_patterns = set(default_patterns + user_patterns)
+    
+    # 2. 빈 줄이나 주석(#)을 필터링하여 최종 패턴 리스트를 만듭니다.
+    final_patterns = [
+        p.strip() for p in combined_patterns if p.strip() and not p.strip().startswith("#")
+    ]
+    
+    if not final_patterns:
+        return None
+        
+    return PathSpec.from_lines("gitwildmatch", final_patterns)
 
 def is_ignored(p: Path, spec: Optional[PathSpec]) -> bool:
     return spec.match_file(p.relative_to(BASE_DIR).as_posix()) if spec else False
@@ -1116,6 +1217,30 @@ def chat_mode(name: str, copy_clip: bool) -> None:
 
     # 1-2. .gptignore를 존중하는 파일 목록 생성 -> 파일 완성기
     spec = ignore_spec()
+    def path_filter(filename: str) -> bool:
+        #return not is_ignored(Path(filename), spec)
+        p = Path(filename)
+        absolute_p = p.resolve()
+        return not is_ignored(absolute_p, spec)
+        
+    real_path_completer = PathCompleter(
+        file_filter=path_filter, 
+        expanduser=True, 
+        only_directories=False
+    )
+    
+    # 3. PathCompleter를 우리만의 래퍼로 감쌉니다.
+    wrapped_file_completer = PathCompleterWrapper(
+        command_prefix="/files ", 
+        path_completer=real_path_completer
+    )
+
+    # 4. 최종 조건부 완성기를 설정합니다.
+    conditional_completer = ConditionalCompleter(
+        command_completer=command_completer,
+        file_completer=wrapped_file_completer  # 교체!
+    )
+    '''
     try:
         file_list = [p.name for p in BASE_DIR.iterdir() if not is_ignored(p, spec)]
     except Exception:
@@ -1128,7 +1253,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
         command_completer=command_completer,
         file_completer=file_completer
     )
-
+    '''
     # 키 바인딩 준비
     key_bindings = KeyBindings()
     session = PromptSession() # session 객체를 먼저 생성해야 filter에서 참조 가능
@@ -1146,7 +1271,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
     session.history = FileHistory(PROMPT_HISTORY_FILE)
     session.auto_suggest = AutoSuggestFromHistory()
     session.multiline = True
-    session.prompt_continuation = "          "
+    session.prompt_continuation = " "
     session.completer = conditional_completer
     session.key_bindings = key_bindings
     session.complete_while_typing = True
@@ -1157,9 +1282,10 @@ def chat_mode(name: str, copy_clip: bool) -> None:
     while True:
         try:
             # ✅ 루프 시작 시, 최신 'attached' 목록으로 completer를 업데이트!
-            attached_filenames = [Path(p).name for p in attached]
-            conditional_completer.update_attached_file_completer(attached_filenames)
-            prompt_text = f"[{current_session_name}|{mode}]> "
+            #attached_filenames = [Path(p).name for p in attached]
+            conditional_completer.update_attached_file_completer(attached)
+            files_info = f"| {len(attached)} files " if attached else ""
+            prompt_text = f"[ {current_session_name} | {mode} {files_info}] Q>> "
             user_in = session.prompt(prompt_text).strip()
         except (EOFError, KeyboardInterrupt):
             console.print()
@@ -1210,8 +1336,52 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 attached = selector.start()
                 console.print(f"[yellow]파일 {len(attached)}개 선택됨: {','.join(attached)}[/yellow]")
             elif cmd == "/files":
-                attached = sorted(list(set(args)))
-                console.print(f"[yellow]파일 {len(attached)}개 선택됨: {','.join(attached)}[/yellow]")
+                current_attached_paths = set(Path(p) for p in attached)
+                newly_added_paths = set()
+
+                feedback_messages = [] 
+                #all_paths = []
+                spec = ignore_spec() # .gptignore 규칙 로드
+                
+                # FileSelector의 재귀 탐색 로직을 재사용하기 위해 임시 인스턴스 생성
+                # 이것이 중복 코드를 방지하는 가장 효율적인 방법입니다.
+                temp_selector = FileSelector()
+
+                for arg in args:
+                    p = Path(arg)
+                    try:
+                        p_resolved = p.resolve(strict=True)
+                    except FileNotFoundError:
+                        console.print(f"[yellow]경고: '{arg}' 경로를 찾을 수 없습니다. 무시합니다.[/yellow]")
+                        continue
+
+                    if p_resolved.is_file():
+                        # 인자가 파일이면, .gptignore 규칙 확인 후 추가
+                        if not is_ignored(p_resolved, spec):
+                            newly_added_paths.add(p_resolved)
+                        else:
+                            console.print(f"[dim]'{p_resolved.name}' 파일은 .gptignore 규칙에 의해 무시됩니다.[/dim]")
+
+                    elif p_resolved.is_dir():
+                        # 인자가 디렉터리면, 재귀적으로 모든 하위 파일 탐색
+                        console.print(f"[dim]'{p_resolved.name}' 디렉터리에서 파일들을 재귀적으로 탐색합니다...[/dim]")
+                        files_in_dir = temp_selector.get_all_files_in_dir(p_resolved)
+                        newly_added_paths.update(files_in_dir)
+
+
+                final_path_set = current_attached_paths.union(newly_added_paths)
+                
+                # 중복을 제거하고 절대 경로 문자열로 변환하여 최종 attached 리스트 생성
+                attached = sorted([str(p) for p in set(final_path_set)])
+                
+                if attached:
+                    display_paths = [str(Path(p).relative_to(BASE_DIR)) for p in attached]
+                    console.print(f"[yellow]파일 {len(attached)}개 선택됨: {', '.join(display_paths)}[/yellow]")
+                else:
+                    console.print("[yellow]선택된 파일이 없습니다.[/yellow]")
+
+                #attached = sorted(list(set(args)))
+                #console.print(f"[yellow]파일 {len(attached)}개 선택됨: {','.join(attached)}[/yellow]")
             elif cmd == "/clearfiles":
                 attached = []
             elif cmd == "/mode":
@@ -1433,6 +1603,49 @@ def single_prompt(text: str) -> None:
     if reply:
         console.print(reply)
 
+
+def create_default_ignore_file_if_not_exists():
+    """전역 기본 .gptignore 파일이 없으면, 합리적인 기본값으로 생성합니다."""
+    if DEFAULT_IGNORE_FILE.exists():
+        return
+
+    # 이전에 코드에 내장했던 기본 패턴들
+    default_patterns_content = """
+# 이 파일은 모든 프로젝트에 공통으로 적용되는 전역 gptcli 무시 규칙입니다.
+# 사용자가 자유롭게 수정할 수 있습니다.
+
+# --- 일반적인 무시 목록 ---
+.DS_Store
+.env
+*.pyc
+*.swp
+
+# --- Python 관련 ---
+__pycache__/
+.venv/
+venv/
+env/
+
+# --- 버전 관리 및 IDE 설정 ---
+.git/
+.vscode/
+.idea/
+
+# --- 이 앱 자체의 파일들 ---
+.gpt_sessions/
+.gpt_prompt_history.txt
+.gpt_favorites.json
+.gptignore
+gpt_outputs/
+gpt_markdowns/
+"""
+    try:
+        CONFIG_DIR.mkdir(exist_ok=True)
+        DEFAULT_IGNORE_FILE.write_text(default_patterns_content.strip(), encoding="utf-8")
+        console.print(f"[dim]전역 기본 무시 파일 생성: {DEFAULT_IGNORE_FILE}[/dim]")
+    except Exception as e:
+        console.print(f"[yellow]경고: 전역 기본 무시 파일을 생성하지 못했습니다: {e}[/yellow]")
+
 # ────────────────────────────────
 # main
 # ────────────────────────────────
@@ -1468,4 +1681,7 @@ def main() -> None:
         chat_mode(args.session, args.copy)
 
 if __name__ == "__main__":
+    
+    create_default_ignore_file_if_not_exists()
+
     main()
