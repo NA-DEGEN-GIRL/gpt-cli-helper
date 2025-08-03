@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from typing import Union  # FileSelector 타입 힌트용
 
 # ── 3rd-party
+import shutil
 import pyperclip
 import urwid
 from dotenv import load_dotenv
@@ -34,6 +35,20 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
+from rich.markdown import Markdown
+from rich.theme import Theme
+
+# 우리 앱만의 커스텀 테마 정의
+rich_theme = Theme({
+    "markdown.h1": "bold bright_white",
+    "markdown.h2": "bold bright_white",
+    "markdown.h3": "bold bright_white",
+    "markdown.list": "cyan",
+    "markdown.block_quote": "italic #8b949e",  # 옅은 회색
+    "markdown.code": "bold white on #484f58",  # 회색 배경
+    "markdown.hr": "yellow",
+    "markdown.link": "underline bright_white"
+})
 
 # ────────────────────────────────
 # 환경 초기화 / ENV INIT
@@ -60,7 +75,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 MD_OUTPUT_DIR.mkdir(exist_ok=True)
 
 TRIMMED_HISTORY = 20
-console = Console()
+console = Console(theme=rich_theme)
 stop_loading = threading.Event()
 
 # .env 로드
@@ -81,14 +96,39 @@ client = OpenAI(
     api_key=OPENROUTER_API_KEY,
     default_headers=DEFAULT_HEADERS,
 )
+
+def get_session_names() -> List[str]:
+    """ .gpt_sessions 디렉터리에서 'session_*.json' 파일들을 찾아 세션 이름을 반환합니다. """
+    names = []
+    if not SESSION_DIR.exists():
+        return []
+    for f in SESSION_DIR.glob("session_*.json"):
+        # "session_default.json" -> "default"
+        name_part = f.name[len("session_"):-len(".json")]
+        names.append(name_part)
+    return sorted(names)
+
 class ConditionalCompleter(Completer):
     """
     모든 문제를 해결한, 최종 버전의 '지능형' 자동 완성기.
+    /mode <mode> [-s <session>] 문법까지 지원합니다.
     """
     def __init__(self, command_completer: Completer, file_completer: Completer):
         self.command_completer = command_completer
         self.file_completer = file_completer
-        self.attached_completer: Optional[Completer] = None  
+        self.attached_completer: Optional[Completer] = None
+
+        self.modes_with_meta = [
+            Completion("dev", display_meta="개발/기술 지원 전문가"),
+            Completion("general", display_meta="친절하고 박식한 어시스턴트"),
+            Completion("teacher", display_meta="코드 구조 분석 아키텍트"),
+        ]
+        self.mode_completer = WordCompleter(
+            words=[c.text for c in self.modes_with_meta], 
+            ignore_case=True,
+            meta_dict={c.text: c.display_meta for c in self.modes_with_meta}
+        )
+        self.session_option_completer = WordCompleter(["-s", "--session"], ignore_case=True)
     
     def update_attached_file_completer(self, attached_filenames: List[str]):
         if attached_filenames:
@@ -99,6 +139,34 @@ class ConditionalCompleter(Completer):
     def get_completions(self, document: Document, complete_event):
         text = document.text_before_cursor
         stripped_text = text.lstrip()
+        
+
+        # mode 선택
+        if stripped_text.startswith('/mode'):
+            words = stripped_text.split()
+
+            # "/mode"만 있거나, "/mode d" 처럼 두 번째 단어 입력 중일 때
+            if len(words) < 2 or (len(words) == 2 and words[1] == document.get_word_before_cursor(WORD=True)):
+                yield from self.mode_completer.get_completions(document, complete_event)
+                return
+
+            # "/mode dev"가 입력되었고, 세 번째 단어("-s")를 입력할 차례일 때
+            # IndexError 방지: len(words) >= 2 인 것이 확실한 상황
+            if len(words) == 2 and words[1] in ["dev", "general", "teacher"] and text.endswith(" "):
+                yield from self.session_option_completer.get_completions(document, complete_event)
+                return
+
+            # "/mode dev -s"가 입력되었고, 네 번째 단어(세션 이름)를 입력할 차례일 때
+            # IndexError 방지: len(words) >= 3 인 것이 확실한 상황
+            if len(words) >= 3 and words[2] in ["-s", "--session"]:
+                session_names = get_session_names()
+                session_completer = FuzzyCompleter(WordCompleter(session_names, ignore_case=True))
+                yield from session_completer.get_completions(document, complete_event)
+                return
+            
+            # 위의 어떤 경우에도 해당하지 않으면, 기본적으로 모드 완성기를 보여줌
+            yield from self.mode_completer.get_completions(document, complete_event)
+            return
 
         # 경우 1: 경로 완성이 필요한 경우
         if stripped_text.startswith('/files '):
@@ -657,7 +725,47 @@ def ask_stream(
 
             당신의 답변은 간결하면서도 사용자의 질문에 대한 핵심을 관통해야 합니다.
         """
-    else:  # general 모드
+    elif mode == "teacher": # "teacher" 모드를 위한 새로운 분기
+        prompt_content = """
+            당신은 코드 분석의 대가, '아키텍트(Architect)'입니다. 당신의 임무는 복잡한 코드 베이스를 유기적인 시스템으로 파악하고, 학생(사용자)이 그 구조와 흐름을 완벽하게 이해할 수 있도록 가르치는 것입니다.
+
+            **[핵심 임무]**
+            첨부된 코드 파일 전체를 종합적으로 분석하여, 고수준의 설계 철학부터 저수준의 함수 구현까지 일관된 관점으로 설명하는 '코드 분석 보고서'를 생성합니다.
+
+            **[보고서 작성 지침]**
+            반드시 아래의 **5단계 구조**와 지정된 **PANEL 헤더** 형식을 따라 보고서를 작성해야 합니다.
+
+            **1. 전체 구조 및 설계 철학**
+            - 이 프로젝트의 핵심 목표는 무엇입니까?
+            - 전체 코드의 폴더 및 파일 구조를 설명하고, 각 부분이 어떤 역할을 하는지 설명하세요. (예: `gptcli_o3.py`는 메인 로직, `.gptignore`는 제외 규칙...)
+            - 이 설계가 채택한 주요 디자인 패턴이나 아키텍처 스타일은 무엇입니까? (예: 상태 머신, 이벤트 기반, 모듈식 설계)
+
+            **2. 주요 클래스 분석: [ClassName]**
+            - 가장 중요하거나 복잡한 클래스를 하나씩 분석합니다.
+            - 클래스의 책임(역할)은 무엇입니까?
+            - 주요 메서드와 속성은 무엇이며, 서로 어떻게 상호작용합니까?
+            - (예시) `FileSelector` 클래스: 파일 시스템을 탐색하고 사용자 선택을 관리하는 TUI 컴포넌트입니다. `refresh` 메서드로...
+
+            **3. 핵심 함수 분석: [FunctionName]**
+            - 독립적으로 중요한 역할을 수행하는 핵심 함수들을 분석합니다.
+            - 이 함수의 입력값, 출력값, 그리고 주요 로직은 무엇입니까?
+            - 왜 이 함수가 필요하며, 시스템의 어느 부분에서 호출됩니까?
+            - (예시) `ask_stream` 함수: OpenAI API와 통신하여 응답을 실시간으로 처리하고 렌더링하는 핵심 엔진입니다. 상태 머신을 이용해...
+
+            **4. 상호작용 및 데이터 흐름**
+            - 사용자가 명령어를 입력했을 때부터 AI의 답변이 출력되기까지, 데이터가 어떻게 흐르고 각 컴포넌트(클래스/함수)가 어떻게 상호작용하는지 시나리오 기반으로 설명하세요.
+            - "사용자 입력 -> `chat_mode` -> `ask_stream` -> `OpenAI` -> 응답 스트림 -> `Syntax`/`Markdown` 렌더링" 과 같은 흐름을 설명하세요.
+
+            **5. 요약 및 다음 단계 제안**
+            - 전체 코드의 장점과 잠재적인 개선점을 요약하세요.
+            - 사용자가 이 코드를 더 깊게 이해하기 위해 어떤 부분을 먼저 보면 좋을지 학습 경로를 제안하세요.
+
+            **[어조 및 스타일]**
+            - 복잡한 개념을 쉬운 비유를 들어 설명하세요.
+            - 단순히 '무엇을' 하는지가 아니라, '왜' 그렇게 설계되었는지에 초점을 맞추세요.
+            - 당신은 단순한 정보 전달자가 아니라, 학생의 성장을 돕는 친절하고 통찰력 있는 선생님입니다.
+        """
+    elif mode == "general":  # general 모드
         prompt_content = """
             당신은 매우 친절하고 박식한 AI 어시스턴트입니다.
 
@@ -676,8 +784,61 @@ def ask_stream(
         "role": "system",
         "content": prompt_content.strip(),
     }
+    def simple_markdown_to_rich(text: str) -> str:
+        """
+        Placeholder 기법을 '올바른 순서'로 사용하여 모든 충돌을 해결한,
+        극도로 안정적인 최종 마크다운 렌더러.
+        """
+        placeholders: Dict[str, str] = {}
+        placeholder_id_counter = 0
 
-    
+        def generate_placeholder(rich_tag_content: str) -> str:
+            nonlocal placeholder_id_counter
+            key = f"__GPCLI_PLACEHOLDER_{placeholder_id_counter}__"
+            placeholders[key] = rich_tag_content
+            placeholder_id_counter += 1
+            return key
+
+        # --- 1단계: 모든 마크업을 Placeholder로 변환 ---
+        # 우선순위가 가장 높은 것부터 처리합니다. 인라인 코드가 가장 강력합니다.
+        
+        # 1-1. 인라인 코드(`...`) -> Placeholder
+        def inline_code_replacer(match: re.Match) -> str:
+            content = match.group(1)
+            if not content.strip():
+                return f"`{content}`"  # 빈 내용은 그대로 둠
+            stripped_content = content.strip() 
+            escaped_content = stripped_content.replace('[', r'\[')
+            #rich_tag = f"[#F8F8F2 on #3C3C3C] {escaped_content} [/]"
+            rich_tag = f"[bold white on #484f58] {escaped_content} [/]"
+            return generate_placeholder(rich_tag)
+
+        processed_text = re.sub(r"`([^`]+)`", inline_code_replacer, text)
+
+        # 1-2. 굵은 글씨(**...**) -> Placeholder
+        def bold_replacer(match: re.Match) -> str:
+            content = match.group(1)
+            return generate_placeholder(f"[bold]{content}[/bold]")
+
+        processed_text = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", bold_replacer, processed_text, flags=re.DOTALL)
+        
+        # --- 2단계: 안전하게 텍스트-레벨 마크업 처리 ---
+        # 이제 모든 rich 태그가 숨겨졌으므로, 남아있는 텍스트를 안전하게 처리합니다.
+        
+        # 2-1. [ 문자 이스케이프: 이제 간단한 replace로 안전하게 처리 가능
+        processed_text = processed_text.replace('[', r'\[')
+        
+        # 2-2. 리스트 마커 변환
+        processed_text = re.sub(r"^(\s*)(\d+)\. ", r"\1[yellow]\2.[/yellow] ", processed_text, flags=re.MULTILINE)
+        processed_text = re.sub(r"^(\s*)[\-\*] ", r"\1[bold blue]•[/bold blue] ", processed_text, flags=re.MULTILINE)
+
+        # --- 3단계: Placeholder를 **역순으로** 복원 ---
+        # 마지막에 생성된 placeholder(가장 바깥쪽)부터 복원해야 중첩이 올바르게 풀립니다. 이것이 핵심입니다.
+        for key in reversed(list(placeholders.keys())):
+            processed_text = processed_text.replace(key, placeholders[key])
+            
+        return processed_text
+
     model_online = model if model.endswith(":online") else f"{model}:online"
     
     # reasoning 지원 모델 감지 및 extra_body 설정
@@ -725,7 +886,7 @@ def ask_stream(
 
     console.print(f"[bold]{model}:[/bold]")
     stream_iter = iter(stream)
-    
+
     try:
         while True:
             chunk = next(stream_iter)
@@ -756,10 +917,12 @@ def ask_stream(
                             break
                 continue
 
-            if not (delta and delta.content): continue
+            if not (delta and delta.content): 
+                continue
             
             full_reply += delta.content
             buffer += delta.content
+            #full_reply = simple_markdown_to_rich(full_reply)
 
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
@@ -769,7 +932,7 @@ def ask_stream(
                 if not in_code_block:
                     if delimiter_info:
                         if normal_buffer: 
-                            console.print(normal_buffer, end="", markup=False)
+                            console.print(simple_markdown_to_rich(normal_buffer), end="", markup=True, highlight = False)
                             normal_buffer = ""
                         
                         in_code_block = True
@@ -787,7 +950,7 @@ def ask_stream(
                                 if total_lines > display_height:
                                     display_text = f"[dim]... ({total_lines - display_height}줄 생략) ...[/dim]\n{display_text}"
                                 
-                                temp_panel = Panel(display_text, height=panel_height, title=f"[yellow]코드 입력중 ({language}) {total_lines}줄[/yellow]", border_style="dim")
+                                temp_panel = Panel(display_text, height=panel_height, title=f"[yellow]코드 입력중 ({language}) {total_lines}줄[/yellow]", border_style="dim", highlight=False)
                                 live.update(temp_panel)
                                 
                                 try:
@@ -822,7 +985,10 @@ def ask_stream(
                                     break
                             
                             if code_buffer.rstrip():
-                                syntax_block = Syntax(code_buffer.rstrip(), language, theme="monokai", line_numbers=True, word_wrap=True)
+                                if language == 'markdown':
+                                    syntax_block = Markdown(code_buffer.rstrip())
+                                else:
+                                    syntax_block = Syntax(code_buffer.rstrip(), language, theme="monokai", line_numbers=True, word_wrap=True)
                                 final_panel = Panel.fit(syntax_block, title=f"[green]코드 ({language})[/green]", border_style="green")
                                 live.update(final_panel)
                             else:
@@ -832,18 +998,64 @@ def ask_stream(
                     else:
                         normal_buffer += line + "\n"
 
+            # 백틱 3개이상 코드 구분을 캐치 못할것을 대비하여 백틱 하나로 끝나면 일단 대기
             if not in_code_block and buffer:
-                normal_buffer += buffer; buffer = ""
-            
+                if buffer.endswith('`'):
+                    pass # 아무것도 안하고 다음 청크를 기다림
+                else:
+                    normal_buffer += buffer
+                    buffer = ""
+
             current_time = time.time()
             if normal_buffer and (len(normal_buffer) > 20 or (current_time - last_flush_time > 0.25)):
-                console.print(normal_buffer, end="", markup=False)
-                normal_buffer = ""; last_flush_time = current_time
+                if '\n' in normal_buffer:
+                    parts = normal_buffer.rsplit('\n',1)
+                    text_to_flush = parts[0] + '\n'
+                    normal_buffer = parts[1]
+                    try:
+                        display_text = simple_markdown_to_rich(text_to_flush)
+                        rich_text = Text.from_markup(display_text, end="")
+                        rich_text.no_wrap = True
+                        console.print(rich_text, highlight=False)
+                        #console.print(display_text, end="", markup=True, highlight=False)
+                    except Exception as e:
+                        # 그냥 있는 그대로 출력하면 문제없이 진행됨
+                        # ▼▼▼ [최종 수정 1] ▼▼▼
+                        # 1. RAW 텍스트로 오류 메시지를 출력합니다.
+                        #console.print(f"\n--- 렌더링 오류 발생 ---", style="bold red")
+                        #console.print(f"오류: {e}", markup=False, highlight=False)
+                        
+                        # 2. Panel을 제거하고, 오류 원본 텍스트를 markup/highlight 없이 순수하게 출력합니다.
+                        # 이것이 재귀적 렌더링 오류를 막는 가장 안전한 방법입니다.
+                        #console.print("--- 오류 원본 텍스트 ---", style="bold cyan")
+                        console.print(text_to_flush, markup=False, highlight=False)
+                        #console.print("--- 오류 원본 끝 ---", style="bold cyan")
+                        # ▲▲▲ 최종 수정 완료 ▲▲▲
 
+                    last_flush_time = current_time
+                #display_text = simple_markdown_to_rich(normal_buffer)
+                #console.print(display_text, end="", markup=True, highlight=False)
+                #console.print(display_text, end="", markup=False, highlight=False)
+                #normal_buffer = ""; last_flush_time = current_time
+        
     except StopIteration:
-        pass
+        if normal_buffer:
+            try:
+                display_text = simple_markdown_to_rich(normal_buffer)
+                rich_text = Text.from_markup(display_text, end="")
+                rich_text.no_wrap = True
+                console.print(rich_text, highlight=False)
+                #console.print(display_text, end="", markup=True, highlight=False)
+            except Exception as e:
+                # 그냥 있는 그대로 출력해버려서 bypass
+                # ▼▼▼ [최종 수정 2] ▼▼▼
+                #console.print(f"\n--- 최종 렌더링 오류 발생 ---", style="bold red")
+                #console.print(f"오류: {e}", markup=False, highlight=False)
+                #console.print("--- 오류 원본 텍스트 ---", style="bold cyan")
+                console.print(normal_buffer, markup=False, highlight=False)
+                #console.print("--- 오류 원본 끝 ---", style="bold cyan")
+                # ▲▲▲ 최종 수정 완료 ▲▲▲
 
-    if normal_buffer: console.print(normal_buffer, end="", markup=False)
     if in_code_block and code_buffer:
         console.print("\n[yellow]경고: 코드 블록이 제대로 닫히지 않았습니다.[/yellow]")
         console.print(Syntax(code_buffer.rstrip(), language, theme="monokai", line_numbers=True))
@@ -886,10 +1098,14 @@ COMMANDS = """
 
 
 def chat_mode(name: str, copy_clip: bool) -> None:
-    data = load_session(name)
+    # 1. 초기 모드는 항상 'dev'로 고정
+    mode = "dev"
+    current_session_name = name
+    
+    data = load_session(current_session_name)
     messages: List[Dict[str, Any]] = data["messages"]
     model = data["model"]
-    mode = "dev"
+    
     attached: List[str] = []
     last_resp = ""
     pretty_print_enabled = True 
@@ -904,6 +1120,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
         file_list = [p.name for p in BASE_DIR.iterdir() if not is_ignored(p, spec)]
     except Exception:
         file_list = []
+    # pathcompleter는 동작안해서 Fuzzycompleter를 쓰지만, 하위 폴더내용물을 접근못함
     file_completer = FuzzyCompleter(WordCompleter(file_list, ignore_case=True))
 
     # ConditionalCompleter 생성 (초기에는 첨부 파일 완성기가 비어있음)
@@ -935,15 +1152,15 @@ def chat_mode(name: str, copy_clip: bool) -> None:
     session.complete_while_typing = True
 
     console.print(Panel.fit(COMMANDS, title="[yellow]/명령어[/yellow]"))
-    console.print(f"[cyan]세션('{name}') 시작 – 모델: {model}[/cyan]")
+    console.print(f"[cyan]세션('{current_session_name}') 시작 – 모델: {model}[/cyan]", highlight=False)
 
     while True:
         try:
             # ✅ 루프 시작 시, 최신 'attached' 목록으로 completer를 업데이트!
             attached_filenames = [Path(p).name for p in attached]
             conditional_completer.update_attached_file_completer(attached_filenames)
-
-            user_in = session.prompt("Question> ").strip()
+            prompt_text = f"[{current_session_name}|{mode}]> "
+            user_in = session.prompt(prompt_text).strip()
         except (EOFError, KeyboardInterrupt):
             console.print()
             break
@@ -962,12 +1179,19 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 console.print(f"고급 출력(Rich) 모드가 {status_text} 되었습니다.")
                 continue
             elif cmd == "/raw":
-                if last_resp:
-                    # 마지막 응답이 존재하면 Panel 안에 Raw 텍스트를 담아 출력
-                    console.print(last_resp)
+                last_assistant_message = None
+                # 리스트를 뒤에서부터 순회하며 가장 최근의 'assistant' 메시지를 찾습니다.
+                for message in reversed(messages):
+                    if message.get("role") == "assistant":
+                        last_assistant_message = message.get("content")
+                        break  # 찾았으면 즉시 중단
+
+                if last_assistant_message:
+                    # 2. 찾은 내용을 'rich'의 자동 강조 없이 순수 텍스트로 출력합니다.
+                    console.print(last_assistant_message, markup=False, highlight=False)
                 else:
-                    # 마지막 응답이 없으면 사용자에게 알림
-                    console.print("[yellow]이전 답변이 없습니다.[/yellow]")
+                    # 3. 세션에 'assistant' 메시지가 하나도 없는 경우
+                    console.print("[yellow]표시할 이전 답변 기록이 없습니다.[/yellow]")
                 continue # 명령어 처리 후 다음 프롬프트로 넘어감
             elif cmd == "/commands":
                 console.print(Panel.fit(COMMANDS, title="[yellow]/명령어[/yellow]"))
@@ -990,11 +1214,93 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 console.print(f"[yellow]파일 {len(attached)}개 선택됨: {','.join(attached)}[/yellow]")
             elif cmd == "/clearfiles":
                 attached = []
-            elif cmd == "/mode" and args:
-                mode = args[0]
+            elif cmd == "/mode":
+                
+                parser = argparse.ArgumentParser(prog="/mode", description="모드와 세션을 변경합니다.")
+                parser.add_argument("mode_name", choices=["dev", "general", "teacher"], help="변경할 모드 이름")
+                parser.add_argument("-s", "--session", dest="session_name", default=None, help="사용할 세션 이름")
+
+                try:
+                    # argparse는 에러 시 sys.exit()를 호출하므로 try-except로 감싸야 앱이 종료되지 않음
+                    parsed_args = parser.parse_args(args)
+                except SystemExit:
+                    # 잘못된 인자가 들어오면 도움말을 보여주고 다음 프롬프트로 넘어감
+                    continue
+
+                new_mode = parsed_args.mode_name
+                
+                # 1. 모드/세션 변경 전, 현재 대화 내용 저장
+                save_session(current_session_name, messages, model)
+                
+                # 2. 새로운 세션 이름 결정 (옵션 vs 기본값)
+                if parsed_args.session_name:
+                    # 사용자가 -s 옵션으로 세션을 '명시적'으로 지정한 경우
+                    new_session_name = parsed_args.session_name
+                    console.print(f"[cyan]'{new_mode}' 모드를 세션 '{new_session_name}'(으)로 로드합니다.[/cyan]")
+                else:
+                    # -s 옵션이 없는 '기본' 전환 로직
+                    if new_mode in ["dev", "teacher"]:
+                        new_session_name = "default"
+                    else: # general
+                        new_session_name = "general"
+                
+                # 첨부파일 초기화
+                if new_session_name != current_session_name or mode != new_mode:
+                    if attached:
+                        attached.clear()
+                        console.print("[dim]첨부 파일 목록이 초기화되었습니다.[/dim]")
+                
+                # 3. 세션 데이터 교체 (필요 시)
+                if new_session_name != current_session_name:
+                    current_session_name = new_session_name
+                    data = load_session(current_session_name)
+                    messages = data["messages"]
+                    if data["model"] != model:
+                        model = data["model"]
+                        console.print(f"[cyan]세션에 저장된 모델로 변경: {model}[/cyan]")
+                
+                # 4. 최종 모드 설정 및 상태 출력
+                mode = new_mode
+                console.print(f"[green]전환 완료. 현재 모드: [bold]{mode}[/bold], 세션: [bold]{current_session_name}[/bold][/green]")
+                
             elif cmd == "/reset":
-                messages.clear()
-                console.print("[yellow]세션 초기화[/yellow]")
+                #messages.clear()
+                #console.print("[yellow]세션 초기화[/yellow]")
+                # 1. 현재 세션 파일 경로를 가져옵니다.
+                current_session_path = SESSION_DIR / f"session_{current_session_name}.json"
+
+                if not current_session_path.exists():
+                    console.print(f"[yellow]세션 '{current_session_name}'에 대한 저장된 파일이 없어 초기화할 내용이 없습니다.[/yellow]")
+                    messages.clear() # 메모리만 초기화
+                    continue
+
+                # 2. 백업 파일 경로를 생성합니다 (타임스탬프 포함).
+                backup_dir = SESSION_DIR / "backup"
+                backup_dir.mkdir(exist_ok=True)
+
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+
+                backup_filename = f"session_{current_session_name}_{timestamp}.json"
+                backup_session_path = backup_dir / backup_filename
+
+                try:
+                    shutil.move(str(current_session_path), str(backup_session_path))
+                    messages.clear()
+                    save_session(current_session_name, messages, model)
+
+                    backup_display_path = backup_session_path.relative_to(BASE_DIR)
+                    console.print(
+                        Panel.fit(
+                            f"세션 '{current_session_name}'이 초기화되었습니다.\n"
+                            f"[dim]이전 데이터는 아래 경로에 백업되었습니다:[/dim]\n"
+                            f"[green]{backup_display_path}[/green]",
+                            title="[yellow]세션 초기화 및 백업 완료[/yellow]"
+                        )
+                    )
+                except Exception as e:
+                    console.print(f"[bold red]오류: 세션 초기화 및 백업에 실패했습니다.[/bold red]")
+                    console.print(f"[dim]{e}[/dim]")
+
             elif cmd == "/savefav" and args:
                 if messages and messages[-1]["role"] == "user":
                     content = messages[-1]["content"]
@@ -1067,7 +1373,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
             continue
 
         messages.append({"role": "assistant", "content": reply})
-        save_session(name, messages, model)
+        save_session(current_session_name, messages, model)
         last_resp = reply
 
         # ── 후처리
@@ -1075,11 +1381,11 @@ def chat_mode(name: str, copy_clip: bool) -> None:
         if code_blocks:
             saved_files = save_code_blocks(code_blocks)
             if saved_files:
-                saveed_paths_text = Text("\n".join(
+                saved_paths_text = Text("\n".join(
                     f"  • {p.relative_to(BASE_DIR)}" for p in saved_files                          
                 ))                  
                 console.print(Panel.fit(
-                    saveed_paths_text,
+                    saved_paths_text,
                     title="[green]💾 코드 블록 저장 완료[/green]",
                     border_style="dim",
                     title_align="left"
