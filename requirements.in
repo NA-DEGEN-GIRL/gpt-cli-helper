@@ -1,8 +1,8 @@
+# requirements.txt
 openai
 python-dotenv
 rich
-pyperclip
 urwid
+prompt-toolkit
+pyperclip
 pathspec
-prompt_toolkit
-requests
