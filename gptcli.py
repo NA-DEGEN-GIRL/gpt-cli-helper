@@ -1025,7 +1025,7 @@ def ask_stream(
             buffer += delta.content
             #full_reply = simple_markdown_to_rich(full_reply)
 
-            while "\n" in buffer:
+            while "\n" in buffer and not buffer.endswith('\n'):
                 line, buffer = buffer.split("\n", 1)
 
                 delimiter_info = _parse_backticks(line)
@@ -1102,7 +1102,7 @@ def ask_stream(
             # 백틱 3개이상 코드 구분을 캐치 못할것을 대비하여 백틱 하나로 끝나면 일단 대기
             if not in_code_block and buffer:
                 if buffer.endswith('`'):
-                    pass # 아무것도 안하고 다음 청크를 기다림
+                    continue # pass가 아니라 continue여야함
                 else:
                     normal_buffer += buffer
                     buffer = ""
