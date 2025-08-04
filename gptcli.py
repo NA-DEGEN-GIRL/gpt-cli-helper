@@ -482,7 +482,7 @@ def _parse_backticks(line: str) -> Optional[tuple[int, str]]:
     if len(stripped_line) > count and stripped_line[count] == '`':
         return None
 
-    language = stripped_line[count:].strip()
+    language = stripped_line[count:].strip() # ? 순수하게 ```으로 끝난다면?
     return count, language
 
 
@@ -996,7 +996,10 @@ def ask_stream(
             if hasattr(delta, 'reasoning') and delta.reasoning:
                 if normal_buffer: console.print(normal_buffer, end="", markup=False); normal_buffer = ""
                 
-                with Live(console=console, auto_refresh=True, refresh_per_second=4, transient=True) as live:
+                # with Live(...) as live: 대신 수동 제어로 변경
+                live = Live(console=console, auto_refresh=True, refresh_per_second=4, transient=True)
+                live.start()  # Live 객체 수동 시작
+                try:
                     reasoning_buffer = delta.reasoning
                     while True:
                         try:
@@ -1016,6 +1019,14 @@ def ask_stream(
                                 buffer += delta.content; break
                         except StopIteration:
                             break
+                finally:
+                    # 루프가 어떻게 끝나든 반드시 Live를 중지하고 화면을 정리합니다.
+                    live.stop()
+                
+                # ▼▼▼ 여기가 핵심적인 수정사항입니다 ▼▼▼
+                # Live 객체가 화면에서 사라진 후, 다음 출력이 깨지는 것을 방지하기 위해
+                # 빈 줄을 한 번 출력하여 터미널의 커서 위치와 상태를 동기화합니다.
+                console.line() 
                 continue
 
             if not (delta and delta.content): 
@@ -1025,7 +1036,7 @@ def ask_stream(
             buffer += delta.content
             #full_reply = simple_markdown_to_rich(full_reply)
 
-            while "\n" in buffer and not buffer.endswith('\n'):
+            while "\n" in buffer: # and not buffer.endswith('\n'):
                 line, buffer = buffer.split("\n", 1)
 
                 delimiter_info = _parse_backticks(line)
@@ -1041,8 +1052,9 @@ def ask_stream(
                         nesting_depth = 0
                         code_buffer = ""
                         
-                        live = Live(console=console, auto_refresh=True, refresh_per_second=5)
-                        with live:
+                        live = Live(console=console, auto_refresh=True, refresh_per_second=4)
+                        live.start() # Live 수동 시작
+                        try:
                             while in_code_block:
                                 lines, total_lines = code_buffer.splitlines(), len(code_buffer.splitlines())
                                 panel_height, display_height = 12, 10
@@ -1094,8 +1106,13 @@ def ask_stream(
                                 live.update(final_panel)
                             else:
                                 live.update("")
+
+                        finally:
+                            # 루프가 정상 종료되거나 예외로 중단되더라도 항상 Live를 중지합니다.
+                            # 이렇게 하면 최종 렌더링 결과가 화면에 고정됩니다.
                             live.stop()
-                            
+                        
+                        console.line()
                     else:
                         normal_buffer += line + "\n"
 
