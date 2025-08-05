@@ -70,11 +70,13 @@ FAVORITES_FILE = BASE_DIR / ".gpt_favorites.json"
 IGNORE_FILE = BASE_DIR / ".gptignore"
 OUTPUT_DIR = BASE_DIR / "gpt_outputs"
 MD_OUTPUT_DIR = BASE_DIR / "gpt_markdowns"
+CODE_OUTPUT_DIR = BASE_DIR / "gpt_codes"
 MODELS_FILE = CONFIG_DIR / "ai_models.txt"
 DEFAULT_IGNORE_FILE = CONFIG_DIR / ".gptignore_default"
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 MD_OUTPUT_DIR.mkdir(exist_ok=True)
+CODE_OUTPUT_DIR.mkdir(exist_ok=True)
 
 #TRIMMED_HISTORY = 20
 DEFAULT_CONTEXT_LENGTH = 200000
@@ -590,7 +592,27 @@ def ignore_spec() -> Optional[PathSpec]:
     return PathSpec.from_lines("gitwildmatch", final_patterns)
 
 def is_ignored(p: Path, spec: Optional[PathSpec]) -> bool:
-    return spec.match_file(p.relative_to(BASE_DIR).as_posix()) if spec else False
+    """
+    주어진 경로가 ignore spec에 의해 무시되어야 하는지 확인합니다.
+    디렉터리일 경우 경로 끝에 '/'를 추가하여 정확도를 높입니다.
+    """
+    if not spec:
+        return False
+    
+    try:
+        # 1. 프로젝트 루트(BASE_DIR)에 대한 상대 경로를 계산합니다.
+        relative_path_str = p.relative_to(BASE_DIR).as_posix()
+    except ValueError:
+        # p가 BASE_DIR 외부에 있는 경로일 경우, 무시 규칙의 대상이 아니므로 False를 반환합니다.
+        return False
+
+    # 2. [핵심 수정] 경로가 디렉터리인 경우, 명시적으로 끝에 슬래시를 추가합니다.
+    #    이렇게 해야 "gpt_codes/" 같은 디렉터리 전용 패턴이 올바르게 동작합니다.
+    if p.is_dir() and not relative_path_str.endswith('/'):
+        relative_path_str += '/'
+        
+    # 3. 수정된 경로 문자열로 매칭을 수행합니다.
+    return spec.match_file(relative_path_str)
 
 
 # 파일 처리
@@ -746,8 +768,8 @@ def extract_code_blocks(markdown: str) -> List[Tuple[str, str]]:
         
     return blocks
 
-def save_code_blocks(blocks: Sequence[Tuple[str, str]]) -> List[Path]:
-    OUTPUT_DIR.mkdir(exist_ok=True)
+def save_code_blocks(blocks: Sequence[Tuple[str, str]], current_session_name: str, current_msg_id: int) -> List[Path]:
+    CODE_OUTPUT_DIR.mkdir(exist_ok=True)
     saved: List[Path] = []
     
     # 다양한 언어 확장자를 지원하도록 대폭 확장된 매핑
@@ -785,11 +807,11 @@ def save_code_blocks(blocks: Sequence[Tuple[str, str]]) -> List[Path]:
         lang_key = lang.lower() if lang else "text"
         ext = ext_map.get(lang_key, "txt")
         
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        p = OUTPUT_DIR / f"gpt_output_{timestamp}_{i}.{ext}"
+        #timestamp = time.strftime("%Y%m%d_%H%M%S")
+        p = CODE_OUTPUT_DIR / f"codeblock_{current_session_name}_{current_msg_id}_{i}.{ext}"
         cnt = 1
         while p.exists():
-            p = OUTPUT_DIR / f"gpt_output_{timestamp}_{i}_{cnt}.{ext}"
+            p = CODE_OUTPUT_DIR / f"codeblock_{current_session_name}_{current_msg_id}_{i}_{cnt}.{ext}"
             cnt += 1
         
         p.write_text(code, encoding="utf-8")
@@ -1814,7 +1836,8 @@ def chat_mode(name: str, copy_clip: bool) -> None:
         # ── 후처리
         code_blocks = extract_code_blocks(reply)
         if code_blocks:
-            saved_files = save_code_blocks(code_blocks)
+            current_msg_id = sum(1 for m in data["messages"] if m["role"] == "assistant") # 몇번째 대답인지
+            saved_files = save_code_blocks(code_blocks, current_session_name, current_msg_id)
             if saved_files:
                 saved_paths_text = Text("\n".join(
                     f"  • {p.relative_to(BASE_DIR)}" for p in saved_files                          
