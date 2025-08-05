@@ -1,18 +1,14 @@
-# you can comment out with '#'
+# OpenRouter.ai Models (gpt-cli auto-generated)
 
-anthropic/claude-sonnet-4
-anthropic/claude-opus-4
-
-openai/gpt-4.1
-openai/o4-mini-high
-openai/o3-pro
-
-google/gemini-2.5-flash
-google/gemini-2.5-pro
-
-qwen/qwen3-235b-a22b-thinking-2507
-qwen/qwen3-coder
-qwen/qwen3-235b-a22b-2507
-
-x-ai/grok-4
-
+anthropic/claude-opus-4 200000
+anthropic/claude-sonnet-4 200000
+google/gemini-2.5-flash 1048576
+google/gemini-2.5-pro 1048576
+openai/gpt-4.1 1047576
+openai/o3-mini 200000
+openai/o3-pro 200000
+openai/o4-mini-high 200000
+qwen/qwen3-235b-a22b-2507 262144
+qwen/qwen3-235b-a22b-thinking-2507 262144
+qwen/qwen3-coder 262144
+x-ai/grok-4 256000

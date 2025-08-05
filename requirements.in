@@ -6,3 +6,4 @@ urwid
 prompt-toolkit
 pyperclip
 pathspec
+requests

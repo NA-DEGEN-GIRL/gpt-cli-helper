@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from typing import Union  # FileSelector 타입 힌트용
 
 # ── 3rd-party
+import requests
 import shutil
 import pyperclip
 import urwid
@@ -272,11 +273,19 @@ def select_model(current: str) -> str:
     if not MODELS_FILE.exists():
         console.print(f"[yellow]{MODELS_FILE} 가 없습니다.[/yellow]")
         return current
-    models = [
-        line.strip() for line in MODELS_FILE.read_text().splitlines()
-        if line.strip() and not line.startswith("#")
-    ]
-    if not models:
+    
+    models = []
+    try:
+        lines = MODELS_FILE.read_text(encoding="utf-8").splitlines()
+        for line in lines:
+            # 주석이거나 빈 줄은 건너뜁니다.
+            if line.strip().startswith("#") or not line.strip():
+                continue
+            # "모델ID 컨텍스트길이" 형식에서 모델ID만 추출합니다.
+            model_id = line.strip().split()[0]
+            models.append(model_id)
+    except Exception as e:
+        console.print(f"[red]모델 파일({MODELS_FILE}) 읽기 오류: {e}[/red]")
         return current
 
     # ▼▼▼ 개선점 1: TUI 상단에 현재 모델 정보 표시 ▼▼▼
@@ -319,6 +328,166 @@ def select_model(current: str) -> str:
     urwid.MainLoop(listbox, palette=PALETTE, unhandled_input=unhandled).run()
     
     return result[0] or current
+
+class ModelSearcher:
+    """OpenRouter 모델을 검색하고 TUI를 통해 선택하여 `ai_models.txt`를 업데이트합니다."""
+    
+    API_URL = "https://openrouter.ai/api/v1/models"
+    
+    def __init__(self):
+        self.all_models_map: Dict[str, Dict[str, Any]] = {}
+        self.selected_ids: Set[str] = set()
+        self.expanded_ids: Set[str] = set()
+        self.display_models: List[Dict[str, Any]] = []
+
+    def _fetch_all_models(self) -> bool:
+        try:
+            with console.status("[cyan]OpenRouter에서 모델 목록을 가져오는 중...", spinner="dots"):
+                response = requests.get(self.API_URL, timeout=10)
+                response.raise_for_status()
+            self.all_models_map = {m['id']: m for m in response.json().get("data", [])}
+            return True if self.all_models_map else False
+        except requests.RequestException as e:
+            console.print(f"[red]API 실패: {e}[/red]"); return False
+
+    def _get_existing_model_ids(self) -> Set[str]:
+        if not MODELS_FILE.exists(): return set()
+        try:
+            lines = MODELS_FILE.read_text(encoding="utf-8").splitlines()
+            return {line.strip().split()[0] for line in lines if line.strip() and not line.strip().startswith("#")}
+        except Exception: return set()
+
+    def _save_models(self):
+        try:
+            final_ids = sorted(list(self.selected_ids))
+            with MODELS_FILE.open("w", encoding="utf-8") as f:
+                f.write("# OpenRouter.ai Models (gpt-cli auto-generated)\n\n")
+                for model_id in final_ids:
+                    model_data = self.all_models_map.get(model_id, {})
+                    f.write(f"{model_id} {model_data.get('context_length', 0)}\n")
+            console.print(f"[green]성공: {len(final_ids)}개 모델로 '{MODELS_FILE}' 업데이트 완료.[/green]")
+        except Exception as e:
+            console.print(f"[red]저장 실패: {e}[/red]")
+            
+    class Collapsible(urwid.Pile):
+        def __init__(self, model_data, is_expanded, is_selected, in_existing):
+            self.model_id = model_data.get('id', 'N/A')
+            
+            checked = "✔" if is_selected else " "
+            arrow = "▼" if is_expanded else "▶"
+            context_length = model_data.get("context_length")
+            context_str = f"[CTX: {context_length:,}]" if context_length else "[CTX: N/A]"
+
+            
+            style = "key" if in_existing else "default"
+            
+            # 첫 번째 라인: 포커스 시 배경색이 변경되도록 AttrMap으로 감쌈
+            line1_cols = urwid.Columns([
+                ('pack', urwid.Text(f"[{checked}] {arrow}")),
+                ('weight', 1, urwid.Text(self.model_id)),
+                ('pack', urwid.Text(context_str)),
+            ], dividechars=1)
+            line1_wrapped = urwid.AttrMap(line1_cols, style, focus_map='myfocus')
+
+            widget_list = [line1_wrapped]
+            
+            if is_expanded:
+                desc_text = model_data.get('description') or "No description available."
+                desc_content = urwid.Text(desc_text, wrap='space')
+                padded_content = urwid.Padding(desc_content, left=4, right=2)
+                desc_box = urwid.LineBox(padded_content, tlcorner=' ', tline=' ', lline=' ', 
+                                         trcorner=' ', blcorner=' ', rline=' ', bline=' ', brcorner=' ')
+                # 설명 부분은 포커스와 상관없이 항상 동일한 배경
+                widget_list.append(urwid.AttrMap(desc_box, 'info_bg'))
+
+            super().__init__(widget_list)
+
+        def selectable(self) -> bool:
+            return True
+
+    def start(self, keywords: List[str]):
+        if not self._fetch_all_models(): return
+
+        existing_ids = self._get_existing_model_ids()
+        self.selected_ids = existing_ids.copy()
+
+        model_ids_to_display = set(self.all_models_map.keys()) if not keywords else existing_ids.copy()
+        if keywords:
+            for mid, mdata in self.all_models_map.items():
+                search_text = f"{mid} {mdata.get('name', '')}".lower()
+                if any(kw.lower() in search_text for kw in keywords):
+                    model_ids_to_display.add(mid)
+
+        self.display_models = [self.all_models_map[mid] for mid in sorted(list(model_ids_to_display)) if mid in self.all_models_map]
+        self.display_models.sort(key=lambda m: (m['id'] not in existing_ids, m.get('id', '')))
+
+        list_walker = urwid.SimpleFocusListWalker([])
+        listbox = urwid.ListBox(list_walker)
+
+        def refresh_list():
+            try:
+                current_focus_pos = listbox.focus_position
+            except IndexError:
+                current_focus_pos = 0 # 리스트가 비어있으면 0으로 초기화
+
+            widgets = [
+                self.Collapsible(m, m['id'] in self.expanded_ids, m['id'] in self.selected_ids, m['id'] in existing_ids)
+                for m in self.display_models
+            ]
+            list_walker[:] = widgets #! .contents가 아니라 슬라이싱으로 할당
+            
+            if widgets:
+                listbox.focus_position = min(current_focus_pos, len(widgets) - 1)
+        
+        refresh_list()
+        listbox.focus_position = 0
+
+        def keypress(key: str):
+            if isinstance(key, tuple): return
+            try:
+                model_widget = list_walker[listbox.focus_position]
+                model_id = model_widget.model_id
+            except (IndexError, AttributeError): return
+
+            if key == 'enter':
+                self.expanded_ids.symmetric_difference_update({model_id})
+            elif key == ' ':
+                self.selected_ids.symmetric_difference_update({model_id})
+            elif key.lower() == 'a':
+                self.selected_ids.update(m['id'] for m in self.display_models)
+            elif key.lower() == 'n':
+                for m in self.display_models:
+                    self.selected_ids.discard(m['id'])
+        
+        help_text = urwid.Text([ "명령어: ", ("key", "Enter"),":설명 ", ("key", "Space"),":선택 ", ("key", "A/N"),":전체선택/해제 ", ("key", "S"),":저장 ", ("key", "Q"),":취소" ])
+        header_title = lambda: f"{len(self.display_models)}개 모델 표시됨 (전체 {len(self.selected_ids)}개 선택됨)"
+        header = urwid.Pile([urwid.Text(header_title()), help_text, urwid.Divider()])
+        frame = urwid.Frame(listbox, header=header)
+        
+        save_triggered = False
+        def exit_handler(key):
+            nonlocal save_triggered
+            if isinstance(key, tuple): return
+            if key.lower() == 's':
+                save_triggered = True; raise urwid.ExitMainLoop()
+            elif key.lower() == 'q':
+                raise urwid.ExitMainLoop()
+            
+            keypress(key)
+            refresh_list()
+            header.widget_list[0].set_text(header_title())
+        
+        screen = urwid.raw_display.Screen()
+        main_loop = urwid.MainLoop(frame, palette=PALETTE, screen=screen, unhandled_input=exit_handler)
+        
+        try: main_loop.run()
+        finally: screen.clear()
+
+        if save_triggered:
+            self._save_models()
+        else:
+            console.print("[dim]모델 선택이 취소되었습니다.[/dim]")
+        
 
 # ────────────────────────────────
 # 유틸 함수
@@ -453,11 +622,14 @@ def prepare_content_part(path: Path) -> Dict[str, Any]:
     }
 
 SENSITIVE_KEYS = ["secret", "private", "key", "api"]
+
 PALETTE = [                               
-            ('key', 'yellow', 'black'),
-            ('info', 'dark gray', 'black'),                                                       
-            ('myfocus', 'black', 'light gray'), # 커스텀 포커스 색                                       
-        ]
+    ('key', 'yellow', 'black'),
+    ('info', 'dark gray', 'black'),
+    ('myfocus', 'black', 'light gray'),
+    ('info_bg', '', 'dark gray'), 
+    ('info_fg', 'dark gray', ''),
+]
 
 def mask_sensitive(text: str) -> str:
     for key in SENSITIVE_KEYS:
@@ -1203,21 +1375,22 @@ prompt_session = PromptSession(
 # 10. 메인 대화 루프
 # ──────────────────────────────────────────────────────
 COMMANDS = """
-/commands            → 명령어 리스트
-/pretty_print        → 고급 출력(Rich) ON/OFF 토글
-/raw                 → 마지막 응답 raw 출력
-/select_model        → 모델 선택 TUI
-/all_files           → 파일 선택기(TUI)
-/files f1 f2 ...     → 수동 파일 지정
-/clearfiles          → 첨부파일 초기화
-/mode <dev|general>  → 시스템 프롬프트 모드
-/savefav <name>      → 질문 즐겨찾기
-/usefav <name>       → 즐겨찾기 사용
-/favs                → 즐겨찾기 목록
-/diffme              → 선택파일 vs GPT 코드 비교
-/diffcode            → 이전↔현재 GPT 코드 비교
-/reset               → 세션 리셋
-/exit                → 종료
+/commands                     → 명령어 리스트
+/pretty_print                 → 고급 출력(Rich) ON/OFF 토글
+/raw                          → 마지막 응답 raw 출력
+/select_model                 → 모델 선택 TUI
+/search_models gpt grok ...   → 모델 검색 및 `ai_models.txt` 업데이트
+/all_files                    → 파일 선택기(TUI)
+/files f1 f2 ...              → 수동 파일 지정
+/clearfiles                   → 첨부파일 초기화
+/mode <dev|general>           → 시스템 프롬프트 모드
+/savefav <name>               → 질문 즐겨찾기
+/usefav <name>                → 즐겨찾기 사용
+/favs                         → 즐겨찾기 목록
+/diffme                       → 선택파일 vs GPT 코드 비교
+/diffcode                     → 이전↔현재 GPT 코드 비교
+/reset                        → 세션 리셋
+/exit                         → 종료
 """.strip()
 
 
@@ -1354,6 +1527,15 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 else:
                     console.print(f"[green]모델 변경없음: {model}[/green]")
                 #console.print()
+            elif cmd == "/search_models":
+                #if not args:
+                #    console.print("[yellow]검색할 키워드를 한 개 이상 입력해주세요. (예: /search_models gpt-4 claude)[/yellow]")
+                #    continue
+                
+                searcher = ModelSearcher()
+                searcher.start(args) # args가 키워드 리스트가 됨
+                continue # 명령어 처리 후 다음 프롬프트로
+            
             elif cmd == "/all_files":
                 selector = FileSelector()
                 attached = selector.start()
