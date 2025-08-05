@@ -76,7 +76,9 @@ DEFAULT_IGNORE_FILE = CONFIG_DIR / ".gptignore_default"
 OUTPUT_DIR.mkdir(exist_ok=True)
 MD_OUTPUT_DIR.mkdir(exist_ok=True)
 
-TRIMMED_HISTORY = 20
+#TRIMMED_HISTORY = 20
+DEFAULT_CONTEXT_LENGTH = 200000
+CONTEXT_TRIM_RATIO = 0.7
 console = Console(theme=rich_theme)
 stop_loading = threading.Event()
 
@@ -98,6 +100,22 @@ client = OpenAI(
     api_key=OPENROUTER_API_KEY,
     default_headers=DEFAULT_HEADERS,
 )
+
+def trim_messages_by_tokens(messages: List[Dict], max_tokens: int) -> List[Dict]:
+    """최근 메시지부터 포함하여, 최대 토큰을 넘지 않도록 대화 기록을 자릅니다."""
+    trimmed_messages = []
+    current_tokens = 0
+    for msg in reversed(messages):
+        msg_str = json.dumps(msg, ensure_ascii=False)
+        msg_tokens = len(msg_str) // 2
+        
+        if current_tokens + msg_tokens > max_tokens:
+            break
+        
+        trimmed_messages.append(msg)
+        current_tokens += msg_tokens
+    
+    return list(reversed(trimmed_messages))
 
 def get_session_names() -> List[str]:
     """ .gpt_sessions 디렉터리에서 'session_*.json' 파일들을 찾아 세션 이름을 반환합니다. """
@@ -269,65 +287,72 @@ class ConditionalCompleter(Completer):
             else:
                 yield from []
 
-def select_model(current: str) -> str:
+def select_model(current_model: str, current_context: int) -> Tuple[str, int]:
     if not MODELS_FILE.exists():
-        console.print(f"[yellow]{MODELS_FILE} 가 없습니다.[/yellow]")
-        return current
+        console.print(f"[yellow]{MODELS_FILE} 가 없습니다. 기본 모델을 유지합니다.[/yellow]")
+        return current_model, current_context
     
-    models = []
+    models_with_context: List[Dict[str, Any]] = []
     try:
         lines = MODELS_FILE.read_text(encoding="utf-8").splitlines()
         for line in lines:
-            # 주석이거나 빈 줄은 건너뜁니다.
-            if line.strip().startswith("#") or not line.strip():
-                continue
-            # "모델ID 컨텍스트길이" 형식에서 모델ID만 추출합니다.
-            model_id = line.strip().split()[0]
-            models.append(model_id)
-    except Exception as e:
+            if line.strip() and not line.strip().startswith("#"):
+                parts = line.strip().split()
+                model_id = parts[0]
+                context_length = DEFAULT_CONTEXT_LENGTH
+                if len(parts) >= 2:
+                    try:
+                        context_length = int(parts[1])
+                    except ValueError:
+                        # 숫자로 변환 실패 시 기본값 사용
+                        pass
+                models_with_context.append({"id": model_id, "context": context_length})
+    except IOError as e:
         console.print(f"[red]모델 파일({MODELS_FILE}) 읽기 오류: {e}[/red]")
-        return current
+        return current_model, current_context
 
-    # ▼▼▼ 개선점 1: TUI 상단에 현재 모델 정보 표시 ▼▼▼
-    # 'info' 팔레트 스타일을 사용하여 눈에 잘 띄게 합니다.
     header_text = urwid.Text([
         "모델 선택 (Enter로 선택, Q로 취소)\n",
-        ("info", f"현재 모델: {current.split('/')[-1]}")
+        ("info", f"현재 모델: {current_model.split('/')[-1]} (CTX: {current_context:,})")
     ])
     items = [header_text, urwid.Divider()]
     
     body: List[urwid.Widget] = []
-    result: List[Optional[str]] = [None]
+    result: List[Optional[Dict[str, Any]]] = [None] 
     
-    def raise_exit(val: Optional[str]) -> None:
+    def raise_exit(val: Optional[Dict[str, Any]]) -> None:
         result[0] = val
         raise urwid.ExitMainLoop()
 
-    for m in models:
-        disp = m.split("/")[-1]
-        
-        # ▼▼▼ 개선점 2: 현재 모델에 시각적 표시 추가 ▼▼▼
-        if m == current:
-            # 현재 선택된 모델은 앞에 화살표를 붙이고 (현재) 텍스트를 추가합니다.
-            label = f"-> {disp} (현재)"
-            # AttrMap을 사용해 다른 색상(예: 'key')으로 강조할 수도 있습니다.
-            # 예: body.append(urwid.AttrMap(btn, 'key', focus_map='myfocus'))
-        else:
-            label = f"   {disp}" # 정렬을 위한 공백 추가
+    for m in models_with_context:
+        model_id = m["id"]
+        context_len = m["context"]
+        disp = model_id.split("/")[-1]
+
+        label = f"   {disp:<40} [CTX: {context_len:,}]"
+        # 현재 모델 강조
+        if model_id == current_model:
+            label = f"-> {disp:<40} [CTX: {context_len:,}] (현재)"
 
         btn = urwid.Button(label)
-        urwid.connect_signal(btn, "click", lambda button, model=m: raise_exit(model))
+        urwid.connect_signal(btn, "click", lambda _, model_info=m: raise_exit(model_info))
         body.append(urwid.AttrMap(btn, None, focus_map="myfocus"))
 
     listbox = urwid.ListBox(urwid.SimpleFocusListWalker(items + body))
     
     def unhandled(key: str) -> None:
-        if key in ("q", "Q"):
-            raise_exit(None)
+        if isinstance(key, str) and key.lower() == "q":
+            raise_exit(None) # 취소 시 None 전달
             
     urwid.MainLoop(listbox, palette=PALETTE, unhandled_input=unhandled).run()
     
-    return result[0] or current
+    # TUI 종료 후 결과 처리
+    if result[0]:
+        # 선택된 모델이 있으면 해당 모델의 ID와 컨텍스트 길이 반환
+        return result[0]['id'], result[0]['context']
+    else:
+        # 취소했으면 기존 모델 정보 그대로 반환
+        return current_model, current_context
 
 class ModelSearcher:
     """OpenRouter 모델을 검색하고 TUI를 통해 선택하여 `ai_models.txt`를 업데이트합니다."""
@@ -514,8 +539,12 @@ def load_session(name: str) -> Dict[str, Any]:
     return data
 
 
-def save_session(name: str, msgs: List[Dict[str, Any]], model: str) -> None:
-    save_json(SESSION_FILE(name), {"messages": msgs, "model": model})
+def save_session(name: str, msgs: List[Dict[str, Any]], model: str, context_length: int) -> None:
+    save_json(SESSION_FILE(name), {
+        "messages": msgs,
+        "model": model,
+        "context_length": context_length,
+    })
 
 
 def load_favorites() -> Dict[str, str]:
@@ -980,6 +1009,7 @@ def ask_stream(
     messages: List[Dict[str, Any]],
     model: str,
     mode: str,
+    model_context_limit: int,
     pretty_print: bool = True
 ) -> Optional[str]:
     console.print(Syntax(" ", "python", theme="monokai", background_color="#008C45"))
@@ -1059,6 +1089,12 @@ def ask_stream(
             당신은 사용자의 든든한 동반자입니다.
         """
 
+    target_max_tokens = int(model_context_limit * CONTEXT_TRIM_RATIO)
+    final_messages = trim_messages_by_tokens(messages, target_max_tokens)
+    
+    if len(final_messages) < len(messages):
+        console.print(f"[dim]컨텍스트 관리: 모델의 토큰 제한({target_max_tokens})에 맞추기 위해 대화 기록을 {len(messages)}개에서 {len(final_messages)}개로 조정했습니다.[/dim]")
+
     system_prompt = {
         "role": "system",
         "content": prompt_content.strip(),
@@ -1128,7 +1164,7 @@ def ask_stream(
         try:
             stream = client.chat.completions.create(
                 model=model_online,
-                messages=[system_prompt] + messages[-TRIMMED_HISTORY:],
+                messages=[system_prompt] + final_messages,
                 stream=True,
                 extra_body=extra_body,
             )
@@ -1402,6 +1438,8 @@ def chat_mode(name: str, copy_clip: bool) -> None:
     data = load_session(current_session_name)
     messages: List[Dict[str, Any]] = data["messages"]
     model = data["model"]
+
+    model_context: int = data.get("context_length", DEFAULT_CONTEXT_LENGTH) 
     
     attached: List[str] = []
     last_resp = ""
@@ -1518,15 +1556,18 @@ def chat_mode(name: str, copy_clip: bool) -> None:
             elif cmd == "/commands":
                 console.print(Panel.fit(COMMANDS, title="[yellow]/명령어[/yellow]"))
             elif cmd == "/select_model":
-                #console.print()
-                old_model = model                                                                            
-                model = select_model(model)
-                if model != old_model:
-                    save_session(name, messages, model)
-                    console.print(f"[green]모델 변경: {old_model} → 현재: {model}[/green]")
+                old_model = model
+                new_model, new_context = select_model(model, model_context)
+                
+                if new_model != old_model:
+                    model = new_model
+                    model_context = new_context
+                    save_session(current_session_name, messages, model, model_context)
+                    console.print(f"[green]모델 변경: {old_model} → {model} (컨텍스트: {model_context})[/green]")
                 else:
                     console.print(f"[green]모델 변경없음: {model}[/green]")
-                #console.print()
+                continue
+
             elif cmd == "/search_models":
                 #if not args:
                 #    console.print("[yellow]검색할 키워드를 한 개 이상 입력해주세요. (예: /search_models gpt-4 claude)[/yellow]")
@@ -1605,7 +1646,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 new_mode = parsed_args.mode_name
                 
                 # 1. 모드/세션 변경 전, 현재 대화 내용 저장
-                save_session(current_session_name, messages, model)
+                save_session(current_session_name, messages, model, model_context)
                 
                 # 2. 새로운 세션 이름 결정 (옵션 vs 기본값)
                 if parsed_args.session_name:
@@ -1661,7 +1702,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 try:
                     shutil.move(str(current_session_path), str(backup_session_path))
                     messages.clear()
-                    save_session(current_session_name, messages, model)
+                    save_session(current_session_name, messages, model, model_context)
 
                     backup_display_path = backup_session_path.relative_to(BASE_DIR)
                     console.print(
@@ -1742,13 +1783,13 @@ def chat_mode(name: str, copy_clip: bool) -> None:
         messages.append(msg_obj)
 
         # ── OpenRouter 호출
-        reply = ask_stream(messages, model, mode, pretty_print=pretty_print_enabled)
+        reply = ask_stream(messages, model, mode, model_context_limit=model_context, pretty_print=pretty_print_enabled)
         if reply is None:
             messages.pop()  # 실패 시 user message 제거
             continue
 
         messages.append({"role": "assistant", "content": reply})
-        save_session(current_session_name, messages, model)
+        save_session(current_session_name, messages, model, model_context)
         last_resp = reply
 
         # ── 후처리
