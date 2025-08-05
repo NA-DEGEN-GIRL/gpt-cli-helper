@@ -1413,6 +1413,7 @@ prompt_session = PromptSession(
 COMMANDS = """
 /commands                     → 명령어 리스트
 /pretty_print                 → 고급 출력(Rich) ON/OFF 토글
+/last_response                → 마지막 응답 고급 출력으로 다시 보기
 /raw                          → 마지막 응답 raw 출력
 /select_model                 → 모델 선택 TUI
 /search_models gpt grok ...   → 모델 검색 및 `ai_models.txt` 업데이트
@@ -1429,6 +1430,18 @@ COMMANDS = """
 /exit                         → 종료
 """.strip()
 
+def get_last_assistant_message(messages: List[Dict[str, Any]]) -> Optional[str]:
+    """
+    대화 기록에서 가장 최근의 'assistant' 역할을 가진 메시지 내용을 찾아 반환합니다.
+    없으면 None을 반환합니다.
+    """
+    for message in reversed(messages):
+        if message.get("role") == "assistant":
+            content = message.get("content")
+            # content가 문자열인지 확인 후 반환
+            if isinstance(content, str):
+                return content
+    return None
 
 def chat_mode(name: str, copy_clip: bool) -> None:
     # 1. 초기 모드는 항상 'dev'로 고정
@@ -1538,14 +1551,20 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 status_text = "[green]활성화[/green]" if pretty_print_enabled else "[yellow]비활성화[/yellow]"
                 console.print(f"고급 출력(Rich) 모드가 {status_text} 되었습니다.")
                 continue
-            elif cmd == "/raw":
-                last_assistant_message = None
-                # 리스트를 뒤에서부터 순회하며 가장 최근의 'assistant' 메시지를 찾습니다.
-                for message in reversed(messages):
-                    if message.get("role") == "assistant":
-                        last_assistant_message = message.get("content")
-                        break  # 찾았으면 즉시 중단
+            elif cmd == "/last_response":
+                last_assistant_message = get_last_assistant_message(messages)
+                if last_assistant_message:
+                    console.print(Panel(
+                        Markdown(last_assistant_message, code_theme="monokai"),
+                        title="[yellow]Last Response[/yellow]", 
+                        border_style="dim"
+                    ))
+                else:
+                    console.print("[yellow]다시 표시할 이전 답변이 없습니다.[/yellow]")
+                continue
 
+            elif cmd == "/raw":
+                last_assistant_message = get_last_assistant_message(messages)
                 if last_assistant_message:
                     # 2. 찾은 내용을 'rich'의 자동 강조 없이 순수 텍스트로 출력합니다.
                     console.print(last_assistant_message, markup=False, highlight=False)
