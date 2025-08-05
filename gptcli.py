@@ -373,7 +373,13 @@ def ignore_spec() -> Optional[PathSpec]:
         user_patterns = IGNORE_FILE.read_text().splitlines()
     
     # 1. 전역 규칙과 프로젝트 규칙을 합치고, set으로 중복을 제거합니다.
-    combined_patterns = set(default_patterns + user_patterns)
+    # combined_patterns = set(default_patterns + user_patterns)
+
+    # 1. 전역 규칙과 프로젝트 규칙을 합치되, 순서를 유지하며 중복을 제거합니다.
+    #    gitignore 규칙은 뒤에 오는 패턴이 앞의 패턴을 덮어쓸 수 있으므로
+    #    set()을 사용하면 패턴 순서가 뒤섞여 "!" 패턴이 올바르게 동작하지 않습니다.
+    #    따라서 dict.fromkeys를 활용해 입력 순서를 보존하며 중복만 제거합니다.
+    combined_patterns = list(dict.fromkeys(default_patterns + user_patterns))
     
     # 2. 빈 줄이나 주석(#)을 필터링하여 최종 패턴 리스트를 만듭니다.
     final_patterns = [
@@ -482,7 +488,7 @@ def _parse_backticks(line: str) -> Optional[tuple[int, str]]:
     if len(stripped_line) > count and stripped_line[count] == '`':
         return None
 
-    language = stripped_line[count:].strip() # ? 순수하게 ```으로 끝난다면?
+    language = stripped_line[count:].strip()
     return count, language
 
 
@@ -1125,7 +1131,7 @@ def ask_stream(
                     buffer = ""
 
             current_time = time.time()
-            if normal_buffer and (len(normal_buffer) > 20 or (current_time - last_flush_time > 0.25)):
+            if normal_buffer and (len(normal_buffer) > 5 or (current_time - last_flush_time > 0.25)):
                 if '\n' in normal_buffer:
                     parts = normal_buffer.rsplit('\n',1)
                     text_to_flush = parts[0] + '\n'
