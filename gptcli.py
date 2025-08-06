@@ -12,6 +12,7 @@ import re
 import sys
 import threading
 import time
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from typing import Union  # FileSelector 타입 힌트용
@@ -1446,6 +1447,7 @@ COMMANDS = """
 /savefav <name>               → 질문 즐겨찾기
 /usefav <name>                → 즐겨찾기 사용
 /favs                         → 즐겨찾기 목록
+/edit                         → 외부 편집기로 긴 질문 작성
 /diffme                       → 선택파일 vs GPT 코드 비교
 /diffcode                     → 이전↔현재 GPT 코드 비교
 /reset                        → 세션 리셋
@@ -1564,7 +1566,54 @@ def chat_mode(name: str, copy_clip: bool) -> None:
             continue
 
         # ── 명령어 처리
-        if user_in.startswith("/"):
+        if user_in.strip() == "/edit":
+            # 1. 임시 파일을 생성합니다.
+            temp_file_path = BASE_DIR / ".gpt_prompt_edit.tmp"
+            temp_file_path.touch()
+
+            # 2. 시스템 기본 편집기 (EDITOR 환경 변수) 또는 vim을 실행합니다.
+            if sys.platform == 'win32':
+                default_editor = 'notepad'
+            else:
+                default_editor = 'vim'
+
+            editor = os.environ.get("EDITOR", "vim")
+            console.print(f"[dim]외부 편집기 ({editor})를 실행합니다...[/dim]")
+            
+            try:
+                # 사용자가 편집기를 닫을 때까지 대기합니다.
+                subprocess.run([editor, str(temp_file_path)], check=True)
+                
+                # 3. 편집이 끝나면 파일 내용을 읽어옵니다.
+                user_in = temp_file_path.read_text(encoding="utf-8").strip()
+                
+                # 생성된 임시 파일 삭제
+                temp_file_path.unlink()
+
+                console.print(user_in, markup=False, highlight=False)
+
+                if not user_in:
+                    console.print("[yellow]입력이 비어있어 취소되었습니다.[/yellow]")
+                    continue # 다음 프롬프트 루프로
+                else:
+                    console.print("[yellow]긴입력 완료[/yellow]")
+
+            except FileNotFoundError:
+                console.print(f"[red]오류: 편집기 '{editor}'를 찾을 수 없습니다. EDITOR 환경 변수를 확인해주세요.[/red]")
+                continue
+
+            except subprocess.CalledProcessError:
+                console.print(f"[red]오류: 편집기 '{editor}'가 오류와 함께 종료되었습니다.[/red]")
+                if temp_file_path.exists(): temp_file_path.unlink()
+                continue
+
+            except Exception as e:
+                console.print(f"[red]오류: {e}[/red]")
+                if temp_file_path.exists(): temp_file_path.unlink()
+
+            #continue
+
+        elif user_in.startswith("/"):
             cmd, *args = user_in.split()
             if cmd == "/exit":
                 break
@@ -1788,6 +1837,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
             elif cmd == "/favs":
                 for k, v in load_favorites().items():
                     console.print(f"[cyan]{k}[/cyan]: {v[:80]}…")
+            
             elif cmd == "/diffme":
                 if not attached or not last_resp:
                     console.print("[yellow]비교 대상 없음[/yellow]")
