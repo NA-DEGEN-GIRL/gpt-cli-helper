@@ -6,3 +6,5 @@ test*/
 .gptignore
 .gpt_sessions
 .venv
+*.png
+.pdf

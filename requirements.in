@@ -7,3 +7,6 @@ prompt-toolkit
 pyperclip
 pathspec
 requests
+Pillow
+tiktoken
+PyPDF2

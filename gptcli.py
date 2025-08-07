@@ -13,11 +13,13 @@ import sys
 import threading
 import time
 import subprocess
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from typing import Union  # FileSelector 타입 힌트용
 
 # ── 3rd-party
+import PyPDF2
 import requests
 import shutil
 import pyperclip
@@ -39,6 +41,11 @@ from rich.syntax import Syntax
 from rich.text import Text
 from rich.markdown import Markdown
 from rich.theme import Theme
+from rich.table import Table
+from rich.box import ROUNDED
+import io
+import tiktoken
+from PIL import Image
 
 # 우리 앱만의 커스텀 테마 정의
 rich_theme = Theme({
@@ -57,6 +64,8 @@ rich_theme = Theme({
 # ────────────────────────────────
 CONFIG_DIR = Path.home() / "codes" / "gpt_cli"
 BASE_DIR = Path.cwd()
+
+COMPACT_ATTACHMENTS = True  # 첨부파일 압축 모드 (기본값: 비활성화)
 
 #_GPCLI_SCREEN = urwid.raw_display.Screen()
 #_GPCLI_SCREEN.set_mouse_keys(True) # 마우스 키 이벤트 활성화
@@ -104,19 +113,337 @@ client = OpenAI(
     default_headers=DEFAULT_HEADERS,
 )
 
+class TokenEstimator:
+    def __init__(self, model: str = "gpt-4"):
+        """
+        모델별 토크나이저 초기화
+        - gpt-4, gpt-3.5-turbo: cl100k_base
+        - older models: p50k_base
+        """
+        try:
+            self.encoder = tiktoken.encoding_for_model(model)
+        except KeyError:
+            self.encoder = tiktoken.get_encoding("cl100k_base")
+    
+    def count_text_tokens(self, text: str) -> int:
+        """텍스트의 정확한 토큰 수 계산"""
+        return len(self.encoder.encode(text))
+    
+    def calculate_image_tokens(self, width: int, height: int, detail: str = "auto") -> int:
+        """
+        OpenAI의 공식 이미지 토큰 계산 방식
+        
+        detail 옵션:
+        - "low": 항상 85 토큰 (512x512 이하로 리사이즈)
+        - "high": 타일 기반 계산 (더 정확한 분석)
+        - "auto": 이미지 크기에 따라 자동 선택
+        """
+        
+        # Low detail: 고정 비용
+        if detail == "low":
+            return 85
+        
+        # High detail: 타일 기반 계산
+        # 1. 이미지를 2048x2048 이내로 조정
+        if width > 2048 or height > 2048:
+            ratio = min(2048/width, 2048/height)
+            width = int(width * ratio)
+            height = int(height * ratio)
+        
+        # 2. 짧은 변을 768px로 조정
+        if min(width, height) > 768:
+            if width < height:
+                height = int(height * 768 / width)
+                width = 768
+            else:
+                width = int(width * 768 / height)
+                height = 768
+        
+        # 3. 512x512 타일로 나누기
+        tiles_x = math.ceil(width / 512)
+        tiles_y = math.ceil(height / 512)
+        total_tiles = tiles_x * tiles_y
+        
+        # 4. 토큰 계산: 베이스(85) + 타일당 170
+        return 85 + (170 * total_tiles)
+    
+    def estimate_image_tokens(self, image_input: Union[Path, str], detail: str = "auto") -> int:
+        """이미지 파일 또는 base64 문자열의 토큰 추정"""
+        try:
+            # base64 문자열인 경우
+            if isinstance(image_input, str):
+                # base64 문자열에서 이미지 디코드
+                try:
+                    # data:image/...;base64, 접두사 제거
+                    if image_input.startswith('data:'):
+                        image_input = image_input.split(',')[1]
+                    
+                    image_data = base64.b64decode(image_input)
+                    img = Image.open(io.BytesIO(image_data))
+                    width, height = img.size
+                    
+                    # base64는 보통 고화질로 처리
+                    if detail == "auto":
+                        detail = "high"
+                    
+                    return self.calculate_image_tokens(width, height, detail)
+                except Exception:
+                    # base64 디코딩 실패 시 길이 기반 추정
+                    return len(image_input) // 4
+            
+            # Path 객체인 경우 (기존 로직)
+            elif isinstance(image_input, Path):
+                with Image.open(image_input) as img:
+                    width, height = img.size
+                    
+                    # 파일 크기 기반 detail 자동 선택
+                    if detail == "auto":
+                        file_size_mb = image_input.stat().st_size / (1024 * 1024)
+                        detail = "low" if file_size_mb < 0.5 else "high"
+                    
+                    return self.calculate_image_tokens(width, height, detail)
+            else:
+                raise ValueError(f"지원하지 않는 입력 타입: {type(image_input)}")
+                
+        except Exception as e:
+            console.print(f"[yellow]이미지 토큰 추정 실패: {e}[/yellow]")
+            # 폴백: 기본값 반환
+            return 1105  # GPT-4V 평균 토큰 수
+    
+    def estimate_pdf_tokens(self, pdf_path: Path) -> int:
+        """
+        PDF 토큰 추정 (대략적)
+        일부 모델만 PDF를 직접 지원하며, 
+        대부분 텍스트 추출 후 처리
+        """
+        try:
+            
+            
+            with open(pdf_path, 'rb') as file:
+                reader = PyPDF2.PdfReader(file)
+                text = ""
+                for page in reader.pages:
+                    text += page.extract_text()
+                
+                return self.count_text_tokens(text)
+        except ImportError:
+            # PyPDF2가 없으면 파일 크기 기반 추정
+            file_size_kb = pdf_path.stat().st_size / 1024
+            return int(file_size_kb * 3)  # 1KB ≈ 3 토큰 (대략)
+        except Exception:
+            # 폴백: base64 크기 기반
+            return len(base64.b64encode(pdf_path.read_bytes())) // 4
+
+def optimize_image_for_api(path: Path, max_dimension: int = 1024, quality: int = 85) -> str:
+    """
+    이미지를 API에 적합하게 최적화
+    - 크기 축소
+    - JPEG 압축
+    - base64 인코딩
+    """
+    try:
+        with Image.open(path) as img:
+            # EXIF 회전 정보 적용
+            img = img.convert('RGB')
+            
+            # 크기 조정 (비율 유지)
+            if max(img.size) > max_dimension:
+                img.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+            
+            # 메모리 버퍼에 JPEG로 저장
+            buffer = io.BytesIO()
+            img.save(buffer, format='JPEG', quality=quality, optimize=True)
+            
+            # base64 인코딩
+            return base64.b64encode(buffer.getvalue()).decode('utf-8')
+            
+    except ImportError:
+        console.print("[yellow]Pillow가 설치되지 않아 이미지 최적화를 건너뜁니다. (pip install Pillow)[/yellow]")
+        return encode_base64(path)
+    except Exception as e:
+        console.print(f"[yellow]이미지 최적화 실패 ({path.name}): {e}[/yellow]")
+        return encode_base64(path)
+
+token_estimator = TokenEstimator()
+
+def prepare_content_part(path: Path, optimize_images: bool = True) -> Dict[str, Any]:
+    """파일을 API 요청용 컨텐츠로 변환"""
+    
+    if path.suffix.lower() in IMG_EXTS:
+        # 이미지 크기 확인
+        file_size_mb = path.stat().st_size / (1024 * 1024)
+        
+        if file_size_mb > 20:  # 20MB 이상
+            return {
+                "type": "text",
+                "text": f"[오류: {path.name} 이미지가 너무 큽니다 ({file_size_mb:.1f}MB). 20MB 이하로 줄여주세요.]"
+            }
+        
+        # 이미지 최적화
+        if optimize_images and file_size_mb > 1:  # 1MB 이상이면 압축
+            console.print(f"[dim]이미지 최적화 중: {path.name} ({file_size_mb:.1f}MB)...[/dim]")
+            base64_data = optimize_image_for_api(path)
+            estimated_tokens = token_estimator.estimate_image_tokens(base64_data, detail="auto")
+        else:
+            base64_data = encode_base64(path)
+            estimated_tokens = token_estimator.estimate_image_tokens(path, detail="auto")
+        
+        
+        if estimated_tokens > 10000:
+            console.print(f"[yellow]경고: {path.name}이 약 {estimated_tokens:,} 토큰을 사용합니다.[/yellow]")
+        
+        data_url = f"data:{mimetypes.guess_type(path)[0] or 'image/jpeg'};base64,{base64_data}"
+        return {
+            "type": "image_url",
+            "image_url": {
+                "url": data_url, 
+                "detail": "auto", 
+                "image_name": path.name, # 내부 참조용
+            }
+        }
+    
+    elif path.suffix.lower() == PDF_EXT:
+        estimated_tokens = token_estimator.estimate_pdf_tokens(path)
+        console.print(f"[dim]PDF 토큰: 약 {estimated_tokens:,}개[/dim]")
+
+        # PDF는 그대로 (일부 모델만 지원)
+        data_url = f"data:application/pdf;base64,{encode_base64(path)}"
+        return {
+            "type": "file",
+            "file": {"filename": path.name, "file_data": data_url},
+        }
+    
+    # 텍스트 파일
+    text = read_plain_file(path)
+    tokens = token_estimator.count_text_tokens(text)
+    console.print(f"[dim]텍스트 토큰: {tokens:,}개[/dim]")
+    return {
+        "type": "text",
+        "text": f"\n\n[파일: {path}]\n```\n{text}\n```",
+    }
+
 def trim_messages_by_tokens(messages: List[Dict], max_tokens: int) -> List[Dict]:
-    """최근 메시지부터 포함하여, 최대 토큰을 넘지 않도록 대화 기록을 자릅니다."""
+    """
+    메시지 리스트를 토큰 제한에 맞게 트리밍합니다.
+    이미지, PDF, 텍스트 각각의 토큰을 정확히 계산합니다.
+    """
+    def calculate_message_tokens(msg: Dict) -> int:
+        """단일 메시지의 토큰 수를 정확히 계산"""
+        total_tokens = 0
+        
+        # role 토큰 (대략 4-5 토큰)
+        total_tokens += 5
+        
+        content = msg.get("content", "")
+        
+        # 1. content가 문자열인 경우 (일반 텍스트 메시지)
+        if isinstance(content, str):
+            total_tokens += token_estimator.count_text_tokens(content)
+        
+        # 2. content가 리스트인 경우 (멀티파트 메시지)
+        elif isinstance(content, list):
+            for part in content:
+                part_type = part.get("type", "")
+                
+                if part_type == "text":
+                    # 텍스트 파트
+                    text_content = part.get("text", "")
+                    total_tokens += token_estimator.count_text_tokens(text_content)
+                
+                elif part_type == "image_url":
+                    # 이미지 파트
+                    image_url = part.get("image_url", {}).get("url", "")
+                    
+                    if "base64," in image_url:
+                        # base64 인코딩된 이미지
+                        try:
+                            # 데이터 URL에서 base64 부분 추출
+                            base64_data = image_url.split("base64,")[1]
+                            
+                            
+                            image_bytes = base64.b64decode(base64_data)
+                            with Image.open(io.BytesIO(image_bytes)) as img:
+                                width, height = img.size
+                                # detail 설정 확인 (기본값: auto)
+                                detail = part.get("image_url", {}).get("detail", "auto")
+                                image_tokens = token_estimator.calculate_image_tokens(width, height, detail)
+                                total_tokens += image_tokens
+                        except Exception as e:
+                            # 이미지 처리 실패 시 base64 길이 기반 추정
+                            console.print(f"[dim yellow]이미지 토큰 계산 실패, 대략적으로 추정: {e}[/dim yellow]")
+                            total_tokens += len(base64_data) // 4
+                    else:
+                        # URL 이미지는 고정 토큰 사용
+                        total_tokens += 85  # low detail 기본값
+                
+                elif part_type == "file":
+                    # PDF 파트
+                    file_data = part.get("file", {})
+                    file_content = file_data.get("file_data", "")
+                    
+                    if "base64," in file_content:
+                        # PDF는 텍스트 추출이 복잡하므로 대략적 추정
+                        base64_data = file_content.split("base64,")[1]
+                        # PDF는 대략 1KB당 3토큰으로 추정
+                        pdf_size_kb = len(base64.b64decode(base64_data)) / 1024
+                        total_tokens += int(pdf_size_kb * 3)
+                    else:
+                        # 기본값
+                        total_tokens += 1000
+        
+        # 메시지 구조 오버헤드 (약 10-20 토큰)
+        total_tokens += 10
+        
+        return total_tokens
+    
+    # 메시지별 토큰 계산 및 캐싱
+    message_tokens = []
+    for msg in messages:
+        tokens = calculate_message_tokens(msg)
+        message_tokens.append((msg, tokens))
+    
+    # 가장 최근 메시지부터 선택하여 토큰 제한 내에 맞추기
     trimmed_messages = []
     current_tokens = 0
-    for msg in reversed(messages):
-        msg_str = json.dumps(msg, ensure_ascii=False)
-        msg_tokens = len(msg_str) // 2
-        
-        if current_tokens + msg_tokens > max_tokens:
+    
+    for msg, tokens in reversed(message_tokens):
+        if current_tokens + tokens > max_tokens:
             break
-        
         trimmed_messages.append(msg)
-        current_tokens += msg_tokens
+        current_tokens += tokens
+
+    if not trimmed_messages and messages:
+        # 가장 최근 메시지의 토큰 수 확인
+        last_msg, last_tokens = message_tokens[-1]
+        
+        console.print(Panel.fit(
+            f"[bold red]⚠️ 컨텍스트 초과 경고[/bold red]\n\n"
+            f"현재 입력이 모델의 토큰 제한을 초과했습니다:\n"
+            f"• 마지막 메시지: {last_tokens:,} 토큰\n"
+            f"• 허용된 제한: {max_tokens:,} 토큰\n"
+            f"• 초과량: {last_tokens - max_tokens:,} 토큰\n\n"
+            f"[yellow]제안사항:[/yellow]\n"
+            f"1. 첨부 파일 크기를 줄이거나 개수를 줄여주세요\n"
+            f"2. 질문을 더 간결하게 작성해주세요\n"
+            f"3. /reset으로 세션을 초기화하고 다시 시도하세요",
+            title="[red]토큰 제한 초과[/red]",
+            border_style="red"
+        ))
+        
+        # 최소한 시스템 메시지라도 보내기 위해 빈 리스트 대신 
+        # 간단한 오류 메시지 반환
+        return [{
+            "role": "user",
+            "content": "이전 컨텍스트가 너무 커서 제거되었습니다. 새로운 대화를 시작합니다."
+        }]
+    
+    # 토큰 사용량 로깅
+    if len(trimmed_messages) < len(messages):
+        removed_count = len(messages) - len(trimmed_messages)
+        console.print(
+            f"[dim]컨텍스트 트리밍: {removed_count}개 메시지 제거 "
+            f"(사용: {current_tokens:,}/{max_tokens:,} 토큰)[/dim]"
+        )
     
     return list(reversed(trimmed_messages))
 
@@ -392,7 +719,9 @@ class ModelSearcher:
                 f.write("# OpenRouter.ai Models (gpt-cli auto-generated)\n\n")
                 for model_id in final_ids:
                     model_data = self.all_models_map.get(model_id, {})
-                    f.write(f"{model_id} {model_data.get('context_length', 0)}\n")
+                    #f.write(f"{model_id} {model_data.get('context_length', 0)}\n")
+                    context_len = model_data.get('context_length') or DEFAULT_CONTEXT_LENGTH
+                    f.write(f"{model_id} {context_len}\n")
             console.print(f"[green]성공: {len(final_ids)}개 모델로 '{MODELS_FILE}' 업데이트 완료.[/green]")
         except Exception as e:
             console.print(f"[red]저장 실패: {e}[/red]")
@@ -503,7 +832,8 @@ class ModelSearcher:
             
             keypress(key)
             refresh_list()
-            header.widget_list[0].set_text(header_title())
+            #header.widget_list[0].set_text(header_title())
+            header.contents[0][0].set_text(header_title())
         
         screen = urwid.raw_display.Screen()
         main_loop = urwid.MainLoop(frame, palette=PALETTE, screen=screen, unhandled_input=exit_handler)
@@ -542,11 +872,26 @@ def load_session(name: str) -> Dict[str, Any]:
     return data
 
 
-def save_session(name: str, msgs: List[Dict[str, Any]], model: str, context_length: int) -> None:
+def save_session(
+    name: str, 
+    msgs: List[Dict[str, Any]], 
+    model: str, 
+    context_length: int,
+    usage_history: List[Dict] = None  # 추가
+) -> None:
+    filtered_history = [u for u in (usage_history or []) if u is not None]
+
     save_json(SESSION_FILE(name), {
         "messages": msgs,
         "model": model,
         "context_length": context_length,
+        "usage_history": usage_history or [],  # 토큰 사용 기록
+        "total_usage": {  # 누적 통계
+            "total_prompt_tokens": sum(u.get("prompt_tokens", 0) for u in (usage_history or [])),
+            "total_completion_tokens": sum(u.get("completion_tokens", 0) for u in (usage_history or [])),
+            "total_tokens": sum(u.get("total_tokens", 0) for u in (usage_history or [])),
+        },
+        "last_updated": time.strftime("%Y-%m-%d %H:%M:%S")
     })
 
 
@@ -644,6 +989,327 @@ PLAIN_EXTS = {
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 PDF_EXT = ".pdf"
 
+SENSITIVE_KEYS = ["secret", "private", "key", "api"]
+
+PALETTE = [                               
+    ('key', 'yellow', 'black'),
+    ('info', 'dark gray', 'black'),
+    ('myfocus', 'black', 'light gray'),
+    ('info_bg', '', 'dark gray'), 
+    ('info_fg', 'dark gray', ''),
+    # Diff 뷰를 위한 스타일 추가
+    ('diff_add', 'black', 'dark green'),
+    ('diff_remove', 'black', 'dark red'),
+    ('header', 'white', 'dark blue'),
+     # Response 관련 - 배경색 제거 또는 black으로 변경
+    ('response_header', 'white,bold', 'black'),  # 'dark blue' -> 'black'
+    ('response_selected', 'black', 'light gray'),  # 선택된 항목만 회색 배경
+    ('response_normal', 'light gray', 'black'),   # 일반 항목은 검정 배경
+    
+    # 파일 관련
+    ('file_selected', 'black', 'light gray'),
+    ('file_normal', 'light gray', 'black'),
+    
+    # Preview 관련
+    ('preview', 'light gray', 'black'),
+    ('preview_border', 'dark gray', 'black')
+]
+
+
+
+class CodeDiffer:
+    def __init__(self, attached_files: List[str], session_name: str, messages: List[Dict]):
+        self.attached_files = [Path(p) for p in attached_files]
+        self.session_name = session_name
+        self.expanded_items: Set[str] = set()
+        self.selected_for_diff: List[Dict] = []
+        self.previewing_item_id: Optional[str] = None
+        self.preview_offset = 0
+        self.preview_lines_per_page = 10  # 한 페이지에 표시할 라인 수
+        
+        self.display_items: List[Dict] = []
+        self.response_files: Dict[int, List[Path]] = self._scan_response_files()
+
+        self.list_walker = urwid.SimpleFocusListWalker([])
+        self.listbox = urwid.ListBox(self.list_walker)
+        self.preview_text = urwid.Text("")
+        self.preview_box = urwid.LineBox(self.preview_text, title="Preview")
+        
+        # 주 레이아웃은 Pile을 사용하되, 미리보기는 동적으로 추가/제거
+        self.main_pile = urwid.Pile([self.listbox])
+        
+        # 키 도움말 업데이트
+        footer_text = "↑/↓:이동 | Enter:확장/프리뷰 | Space:선택 | D:Diff | Q:종료 | PgUp/Dn:스크롤"
+        self.footer = urwid.AttrMap(urwid.Text(footer_text), 'header')
+        
+        self.frame = urwid.Frame(self.main_pile, footer=self.footer)
+        self.main_loop: Optional[urwid.MainLoop] = None
+        
+        # diff 뷰 관련 추가
+        self.diff_scroll_offset = 0
+        self.diff_widget: Optional[urwid.Widget] = None
+
+    def _scan_response_files(self) -> Dict[int, List[Path]]:
+        if not CODE_OUTPUT_DIR.is_dir(): return {}
+        pattern = re.compile(rf"codeblock_{re.escape(self.session_name)}_(\d+)_.*")
+        msg_files: Dict[int, List[Path]] = {}
+        for p in CODE_OUTPUT_DIR.glob(f"codeblock_{self.session_name}_*"):
+            match = pattern.match(p.name)
+            if match:
+                msg_id = int(match.group(1))
+                if msg_id not in msg_files: msg_files[msg_id] = []
+                msg_files[msg_id].append(p)
+        return {k: sorted(v) for k, v in sorted(msg_files.items(), reverse=True)}
+
+    def _render_all(self, keep_focus=True):
+        pos = 0
+        if keep_focus:
+            try: pos = self.listbox.focus_position
+            except IndexError: pos = 0
+        
+        self.display_items = []
+        widgets = []
+        if self.attached_files:
+            section_id = "local_files"
+            arrow = "▼" if section_id in self.expanded_items else "▶"
+            widgets.append(urwid.AttrMap(urwid.SelectableIcon(f"{arrow} Current Local Files ({len(self.attached_files)})"), 'header', 'header'))
+            self.display_items.append({"id": section_id, "type": "section"})
+            if section_id in self.expanded_items:
+                for p in self.attached_files:
+                    checked = "✔" if any(s.get("path") == p for s in self.selected_for_diff) else " "
+                    item_id = f"local_{p.name}"
+                    widgets.append(urwid.AttrMap(urwid.SelectableIcon(f"  [{checked}] {p.name}"), '', 'myfocus'))
+                    self.display_items.append({"id": item_id, "type": "file", "path": p, "source": "local"})
+
+        for msg_id, files in self.response_files.items():
+            section_id = f"response_{msg_id}"
+            arrow = "▼" if section_id in self.expanded_items else "▶"
+            widgets.append(urwid.AttrMap(urwid.SelectableIcon(f"{arrow} Response #{msg_id}"), 'header', 'header'))
+            self.display_items.append({"id": section_id, "type": "section"})
+            if section_id in self.expanded_items:
+                for p in files:
+                    checked = "✔" if any(s.get("path") == p for s in self.selected_for_diff) else " "
+                    item_id = f"response_{msg_id}_{p.name}"
+                    widgets.append(urwid.AttrMap(urwid.SelectableIcon(f"  [{checked}] {p.name}"), '', 'myfocus'))
+                    self.display_items.append({"id": item_id, "type": "file", "path": p, "source": "response", "msg_id": msg_id})
+
+        self.list_walker[:] = widgets
+        if widgets: self.listbox.focus_position = min(pos, len(widgets) - 1)
+        self._update_preview()
+
+    def _update_preview(self):
+        item_id = self.previewing_item_id
+        is_previewing = len(self.main_pile.contents) > 1
+
+        if not item_id:
+            if is_previewing: self.main_pile.contents.pop()
+            return
+
+        item_data = next((item for item in self.display_items if item.get('id') == item_id), None)
+        if not (item_data and item_data['type'] == 'file'):
+            if is_previewing: self.main_pile.contents.pop()
+            return
+            
+        try:
+            content = item_data['path'].read_text(encoding='utf-8', errors='ignore').splitlines()
+            
+            # 스크롤 가능한 범위 계산
+            total_lines = len(content)
+            end_line = min(self.preview_offset + self.preview_lines_per_page, total_lines)
+            
+            preview_text = "\n".join(content[self.preview_offset : end_line])
+            
+            # 스크롤 정보를 타이틀에 표시
+            scroll_info = f" [{self.preview_offset+1}-{end_line}/{total_lines}]"
+            title = f"Preview: {item_data['path'].name}{scroll_info}"
+            
+            self.preview_box.set_title(title)
+            self.preview_text.set_text(preview_text)
+            
+            if not is_previewing:
+                self.main_pile.contents.insert(0, (self.preview_box, self.main_pile.options('pack')))
+        except Exception as e:
+            self.preview_text.set_text(f"[Error]: {e}")
+            if not is_previewing:
+                self.main_pile.contents.insert(0, (self.preview_box, self.main_pile.options('pack')))
+    
+    def handle_input(self, key):
+        if not isinstance(key, str): return
+
+        # 프리뷰 스크롤 처리
+        if self.previewing_item_id and key in ('page up', 'page down'):
+            try:
+                item_data = next(item for item in self.display_items if item.get('id') == self.previewing_item_id)
+                content = item_data['path'].read_text('utf-8').splitlines()
+                total_lines = len(content)
+                max_offset = max(0, total_lines - self.preview_lines_per_page)
+                
+                if key == 'page down':
+                    # 한 페이지 아래로 스크롤
+                    self.preview_offset = min(max_offset, self.preview_offset + self.preview_lines_per_page)
+                elif key == 'page up':
+                    # 한 페이지 위로 스크롤
+                    self.preview_offset = max(0, self.preview_offset - self.preview_lines_per_page)
+                
+                self._update_preview()
+            except (StopIteration, IOError): pass
+            return
+
+        try:
+            pos = self.listbox.focus_position
+            item = self.display_items[pos]
+        except IndexError:
+            self.frame.keypress(self.main_loop.screen_size, key)
+            return
+
+        if key == 'q': raise urwid.ExitMainLoop()
+        
+        elif key == 'enter':
+            if item['type'] == 'section':
+                self.expanded_items.symmetric_difference_update({item['id']})
+            elif item['type'] == 'file':
+                item_id = item['id']
+                self.previewing_item_id = None if self.previewing_item_id == item_id else item_id
+                self.preview_offset = 0
+            self._render_all()
+        
+        elif key == ' ':
+            if item['type'] == 'file':
+                self.handle_selection(item)
+                self._render_all(keep_focus=True)
+
+        elif key.lower() == 'd':
+            if len(self.selected_for_diff) == 2: self._show_diff_view()
+            else: self.footer.original_widget.set_text(f"[!] 2개 항목을 선택해야 diff가 가능합니다. (현재 {len(self.selected_for_diff)}개 선택됨)")
+        
+        else:
+            self.frame.keypress(self.main_loop.screen_size, key)
+    
+    def handle_selection(self, item):
+        is_in_list = any(s['id'] == item['id'] for s in self.selected_for_diff)
+        if not is_in_list:
+            if len(self.selected_for_diff) >= 2:
+                self.footer.original_widget.set_text("[!] 2개 이상 선택할 수 없습니다.")
+                return
+            if item.get('source') == 'local':
+                self.selected_for_diff = [s for s in self.selected_for_diff if s.get('source') != 'local']
+            self.selected_for_diff.append(item)
+        else:
+            self.selected_for_diff = [s for s in self.selected_for_diff if s['id'] != item['id']]
+        self.footer.original_widget.set_text(f" {len(self.selected_for_diff)}/2 선택됨. 'd' 키를 눌러 diff를 실행하세요.")
+    
+    def _show_diff_view(self):
+        if len(self.selected_for_diff) != 2: return
+        item1, item2 = self.selected_for_diff
+        
+        # 시간 순서로 정렬 (local이나 더 오래된 것이 왼쪽)
+        if item1.get("source") == "local" or item1.get("msg_id", 0) < item2.get("msg_id", 0):
+            old_item, new_item = item1, item2
+        else:
+            old_item, new_item = item2, item1
+
+        try:
+            old_content = old_item['path'].read_text('utf-8').splitlines()
+            new_content = new_item['path'].read_text('utf-8').splitlines()
+        except Exception as e:
+            self.footer.original_widget.set_text(f"Error: {e}")
+            return
+            
+        # unified diff 생성
+        diff = list(difflib.unified_diff(
+            old_content, 
+            new_content, 
+            fromfile=f"a/{old_item['path'].name}", 
+            tofile=f"b/{new_item['path'].name}", 
+            lineterm='',
+            n=3  # 컨텍스트 라인 수
+        ))
+        
+        if not diff:
+            self.footer.original_widget.set_text("두 파일이 동일합니다.")
+            return
+        
+        # diff 라인을 위젯으로 변환 (배경색 없이)
+        diff_widgets = []
+        for line in diff:
+            if line.startswith('+++'):
+                # 새 파일 헤더
+                widget = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light green', ''))
+            elif line.startswith('---'):
+                # 원본 파일 헤더
+                widget = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light red', ''))
+            elif line.startswith('@@'):
+                # 위치 정보
+                widget = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('yellow', ''))
+            elif line.startswith('+'):
+                # 추가된 라인 (텍스트 색상만)
+                widget = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light green', ''))
+            elif line.startswith('-'):
+                # 삭제된 라인 (텍스트 색상만)
+                widget = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light red', ''))
+            else:
+                # 컨텍스트 라인
+                widget = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light gray', ''))
+            
+            diff_widgets.append(widget)
+
+        # diff 뷰를 위한 ListBox 생성
+        self.diff_scroll_offset = 0
+        diff_walker = urwid.SimpleFocusListWalker(diff_widgets)
+        diff_listbox = urwid.ListBox(diff_walker)
+        
+        # 스크롤 정보를 표시할 헤더
+        header_text = urwid.Text(f"Diff: {old_item['path'].name} → {new_item['path'].name}")
+        header = urwid.AttrMap(header_text, 'header')
+        
+        # 푸터에 키 도움말
+        footer_text = "PgUp/Dn: 스크롤 | Q: 닫기"
+        diff_footer = urwid.AttrMap(urwid.Text(footer_text), 'header')
+        
+        diff_frame = urwid.Frame(diff_listbox, header=header, footer=diff_footer)
+
+        # 원본 위젯 저장
+        original_widget = self.main_loop.widget
+        
+        def diff_input_handler(key):
+            if isinstance(key, str):
+                if key.lower() == 'q':
+                    # 원본 뷰로 복귀
+                    self.main_loop.widget = original_widget
+                    self.main_loop.unhandled_input = self.handle_input
+                elif key == 'page up':
+                    # diff 뷰 스크롤 업
+                    try:
+                        current_pos = diff_listbox.focus_position
+                        new_pos = max(0, current_pos - 10)
+                        diff_listbox.focus_position = new_pos
+                    except IndexError:
+                        pass
+                elif key == 'page down':
+                    # diff 뷰 스크롤 다운
+                    try:
+                        current_pos = diff_listbox.focus_position
+                        new_pos = min(len(diff_widgets) - 1, current_pos + 10)
+                        diff_listbox.focus_position = new_pos
+                    except IndexError:
+                        pass
+                else:
+                    # 기본 키 처리
+                    diff_frame.keypress(self.main_loop.screen_size, key)
+        
+        # diff 뷰로 전환
+        self.main_loop.unhandled_input = diff_input_handler
+        self.main_loop.widget = diff_frame
+
+    def start(self):
+        self._render_all(keep_focus=False)
+        self.main_pile.focus_item = self.listbox
+        
+        screen = urwid.raw_display.Screen()
+        self.main_loop = urwid.MainLoop(self.frame, palette=PALETTE, screen=screen, unhandled_input=self.handle_input)
+        
+        try: self.main_loop.run()
+        finally: screen.clear()
 
 def read_plain_file(path: Path) -> str:
     try:
@@ -655,33 +1321,6 @@ def read_plain_file(path: Path) -> str:
 def encode_base64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("utf-8")
 
-def prepare_content_part(path: Path) -> Dict[str, Any]:
-    if path.suffix.lower() in IMG_EXTS:
-        data_url = f"data:{mimetypes.guess_type(path)[0]};base64,{encode_base64(path)}"
-        return {"type": "image_url", "image_url": {"url": data_url}}
-    if path.suffix.lower() == PDF_EXT:
-        data_url = f"data:application/pdf;base64,{encode_base64(path)}"
-        return {
-            "type": "file",
-            "file": {"filename": path.name, "file_data": data_url},
-        }
-    # plain text
-    text = read_plain_file(path)
-    safe_text = text # mask_sensitive(text)
-    return {
-        "type": "text",
-        "text": f"\n\n[파일: {path}]\n```\n{safe_text}\n```",
-    }
-
-SENSITIVE_KEYS = ["secret", "private", "key", "api"]
-
-PALETTE = [                               
-    ('key', 'yellow', 'black'),
-    ('info', 'dark gray', 'black'),
-    ('myfocus', 'black', 'light gray'),
-    ('info_bg', '', 'dark gray'), 
-    ('info_fg', 'dark gray', ''),
-]
 
 def mask_sensitive(text: str) -> str:
     for key in SENSITIVE_KEYS:
@@ -845,6 +1484,75 @@ def render_diff(a: str, b: str, lang: str = "text") -> None:
         else:
             console.print(line)
 
+
+def display_attachment_tokens(attached_files: List[str], compact_mode: bool = False) -> None:
+    """첨부 파일들의 토큰 사용량을 시각적으로 표시"""
+    if not attached_files:
+        return
+    
+    table = Table(title="📎 첨부 파일 토큰 분석", box=ROUNDED, title_style="bold cyan")
+    table.add_column("파일명", style="bright_white", width=30)
+    table.add_column("타입", style="yellow", width=10)
+    table.add_column("크기", style="green", width=12, justify="right")
+    table.add_column("예상 토큰", style="cyan", width=15, justify="right")
+    
+    total_tokens = 0
+    file_details = []
+    
+    for file_path in attached_files:
+        path = Path(file_path)
+        if not path.exists():
+            continue
+            
+        # 파일 크기
+        file_size = path.stat().st_size
+        if file_size < 1024:
+            size_str = f"{file_size} B"
+        elif file_size < 1024 * 1024:
+            size_str = f"{file_size / 1024:.1f} KB"
+        else:
+            size_str = f"{file_size / (1024 * 1024):.1f} MB"
+        
+        # 파일 타입 판별
+        if path.suffix.lower() in IMG_EXTS:
+            file_type = "🖼️ 이미지"
+            tokens = token_estimator.estimate_image_tokens(path)
+        elif path.suffix.lower() == PDF_EXT:
+            file_type = "📄 PDF"
+            tokens = token_estimator.estimate_pdf_tokens(path)
+        else:
+            file_type = "📝 텍스트"
+            try:
+                text = read_plain_file(path)
+                tokens = token_estimator.count_text_tokens(text)
+            except:
+                tokens = 0
+        
+        # 파일명 줄이기 (너무 길면)
+        display_name = path.name
+        if len(display_name) > 28:
+            display_name = display_name[:25] + "..."
+        
+        table.add_row(display_name, file_type, size_str, f"{tokens:,}")
+        total_tokens += tokens
+        file_details.append((path.name, tokens))
+    
+    # 요약 행 추가
+    table.add_section()
+    table.add_row(
+        "[bold]합계[/bold]", 
+        f"[bold]{len(attached_files)}개[/bold]", 
+        "", 
+        f"[bold yellow]{total_tokens:,}[/bold yellow]"
+    )
+    
+    console.print(table)
+    
+    if compact_mode:
+        console.print(
+            "[dim green]📦 Compact 모드 활성화됨: "
+            "과거 메시지의 첨부파일이 자동으로 압축됩니다.[/dim green]"
+        )
 
 # ──────────────────────────────────────────────────────
 
@@ -1033,7 +1741,8 @@ def ask_stream(
     model: str,
     mode: str,
     model_context_limit: int,
-    pretty_print: bool = True
+    pretty_print: bool = True,
+    current_attached_files: List[str] = None
 ) -> Optional[str]:
     console.print(Syntax(" ", "python", theme="monokai", background_color="#008C45"))
     console.print(Syntax(" ", "python", theme="monokai", background_color="#F4F5F0"))
@@ -1178,7 +1887,8 @@ def ask_stream(
         return processed_text
 
     model_online = model if model.endswith(":online") else f"{model}:online"
-    
+    usage_info = None
+
     # reasoning 지원 모델 감지 및 extra_body 설정
     use_reasoning = True #any(x in model.lower() for x in ['o1-', 'reasoning'])
     extra_body = {'reasoning': {}} if use_reasoning else {}
@@ -1200,6 +1910,16 @@ def ask_stream(
         console.print(f"[bold]{model}:[/bold]")
         try:
             for chunk in stream:
+                # usage 정보 캡처 추가
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    usage_info = {
+                        "prompt_tokens": chunk.usage.prompt_tokens,
+                        "completion_tokens": chunk.usage.completion_tokens,
+                        "total_tokens": chunk.usage.total_tokens,
+                        "timestamp": time.time(),
+                        "model": model
+                    }
+
                 if chunk.choices[0].delta and chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     full_reply += content
@@ -1209,7 +1929,7 @@ def ask_stream(
             pass
         finally:
             console.print()  # 마지막 줄바꿈
-        return full_reply
+        return full_reply, usage_info
 
     # 상태 머신 변수 초기화
     full_reply = ""
@@ -1225,9 +1945,23 @@ def ask_stream(
     console.print(f"[bold]{model}:[/bold]")
     stream_iter = iter(stream)
 
+    
+
     try:
         while True:
             chunk = next(stream_iter)
+
+            
+            # usage 정보 캡처 (마지막 청크에 포함됨)
+            if hasattr(chunk, 'usage') and chunk.usage:
+                usage_info = {
+                    "prompt_tokens": chunk.usage.prompt_tokens,
+                    "completion_tokens": chunk.usage.completion_tokens,
+                    "total_tokens": chunk.usage.total_tokens,
+                    "timestamp": time.time(),
+                    "model": model
+                }
+
             delta = chunk.choices[0].delta
 
             if hasattr(delta, 'reasoning') and delta.reasoning:
@@ -1416,7 +2150,7 @@ def ask_stream(
         console.print(Syntax(code_buffer.rstrip(), language, theme="monokai", line_numbers=True))
 
     console.print()
-    return full_reply
+    return full_reply, usage_info
 
 
 # ──────────────────────────────────────────────────────
@@ -1435,6 +2169,7 @@ prompt_session = PromptSession(
 # ──────────────────────────────────────────────────────
 COMMANDS = """
 /commands                     → 명령어 리스트
+/compact_mode                 → 첨부파일 압축 모드 ON/OFF 토글
 /pretty_print                 → 고급 출력(Rich) ON/OFF 토글
 /last_response                → 마지막 응답 고급 출력으로 다시 보기
 /raw                          → 마지막 응답 raw 출력
@@ -1448,11 +2183,57 @@ COMMANDS = """
 /usefav <name>                → 즐겨찾기 사용
 /favs                         → 즐겨찾기 목록
 /edit                         → 외부 편집기로 긴 질문 작성
-/diffme                       → 선택파일 vs GPT 코드 비교
-/diffcode                     → 이전↔현재 GPT 코드 비교
+/diff_code                    → 코드 블록 비교 뷰어 열기
 /reset                        → 세션 리셋
+/show_context                 → 현재 컨텍스트 사용량 확인
 /exit                         → 종료
 """.strip()
+
+def convert_to_placeholder_message(msg: Dict) -> Dict:
+    """
+    메시지의 첨부파일을 플레이스홀더로 변환합니다.
+    원본을 수정하지 않고 새로운 딕셔너리를 반환합니다.
+    """
+    import copy
+    
+    # 깊은 복사로 원본 보호
+    new_msg = copy.deepcopy(msg)
+    
+    if isinstance(new_msg.get("content"), str):
+        return new_msg
+    
+    text_content = ""
+    attachments_info = []
+    
+    cnt = 0
+    for part in new_msg.get("content", []):
+        
+        if part.get("type") == "text":
+            # 0 부분은 파일 첨부가 아님
+            if cnt == 0:
+                text_content = part.get("text","")
+            else:
+                attachment_name = part.get("text","").split("\n```")[0].strip().split(":")[1].strip().replace("]","")
+                attachments_info.append(f"{attachment_name}")    
+
+        elif part.get("type") == "image_url":
+            image_name = part.get("image_url", {}).get("image_name", "이미지")
+            attachments_info.append(f"📷 {image_name}")
+
+        elif part.get("type") == "file":
+            filename = part.get("file", {}).get("filename", "파일")
+            attachments_info.append(f"📄 {filename}")
+
+        cnt += 1
+    
+    if attachments_info:
+        attachment_summary = "[첨부: " + ", ".join(attachments_info) + "]"
+        new_msg["content"] = text_content + "\n" + attachment_summary
+
+    else:
+        new_msg["content"] = text_content
+    
+    return new_msg
 
 def get_last_assistant_message(messages: List[Dict[str, Any]]) -> Optional[str]:
     """
@@ -1467,17 +2248,40 @@ def get_last_assistant_message(messages: List[Dict[str, Any]]) -> Optional[str]:
                 return content
     return None
 
+def estimate_message_tokens(messages: List[Dict]) -> int:
+    """메시지 리스트의 전체 토큰 수를 추정"""
+    total = 0
+    for msg in messages:
+        if isinstance(msg.get("content"), str):
+            total += token_estimator.count_text_tokens(msg["content"])
+        elif isinstance(msg.get("content"), list):
+            for part in msg["content"]:
+                if part.get("type") == "text":
+                    total += token_estimator.count_text_tokens(part["text"])
+                elif part.get("type") == "image_url":
+                    # base64 부분 추출 후 토큰 추정
+                    url = part.get("image_url", {}).get("url", "")
+                    if "base64," in url:
+                        base64_part = url.split("base64,")[1]
+                        total += token_estimator.estimate_image_tokens(base64_part)
+                elif part.get("type") == "file":
+                    # PDF 등의 파일
+                    total += 1000  # 기본값
+    return total
+
 def chat_mode(name: str, copy_clip: bool) -> None:
     # 1. 초기 모드는 항상 'dev'로 고정
     mode = "dev"
     current_session_name = name
+    compact_mode = COMPACT_ATTACHMENTS
     
     data = load_session(current_session_name)
     messages: List[Dict[str, Any]] = data["messages"]
     model = data["model"]
 
     model_context: int = data.get("context_length", DEFAULT_CONTEXT_LENGTH) 
-    
+    usage_history: List[Dict] = data.get("usage_history", [])
+
     attached: List[str] = []
     last_resp = ""
     pretty_print_enabled = True 
@@ -1511,20 +2315,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
         command_completer=command_completer,
         file_completer=wrapped_file_completer  # 교체!
     )
-    '''
-    try:
-        file_list = [p.name for p in BASE_DIR.iterdir() if not is_ignored(p, spec)]
-    except Exception:
-        file_list = []
-    # pathcompleter는 동작안해서 Fuzzycompleter를 쓰지만, 하위 폴더내용물을 접근못함
-    file_completer = FuzzyCompleter(WordCompleter(file_list, ignore_case=True))
 
-    # ConditionalCompleter 생성 (초기에는 첨부 파일 완성기가 비어있음)
-    conditional_completer = ConditionalCompleter(
-        command_completer=command_completer,
-        file_completer=file_completer
-    )
-    '''
     # 키 바인딩 준비
     key_bindings = KeyBindings()
     session = PromptSession() # session 객체를 먼저 생성해야 filter에서 참조 가능
@@ -1550,13 +2341,16 @@ def chat_mode(name: str, copy_clip: bool) -> None:
     console.print(Panel.fit(COMMANDS, title="[yellow]/명령어[/yellow]"))
     console.print(f"[cyan]세션('{current_session_name}') 시작 – 모델: {model}[/cyan]", highlight=False)
 
+    
     while True:
         try:
             # ✅ 루프 시작 시, 최신 'attached' 목록으로 completer를 업데이트!
             #attached_filenames = [Path(p).name for p in attached]
             conditional_completer.update_attached_file_completer(attached)
             files_info = f"| {len(attached)} files " if attached else ""
-            prompt_text = f"[ {current_session_name} | {mode} {files_info}] Q>> "
+            mode_indicator = f"| {mode}"
+            compact_indicator = " 📦" if compact_mode else ""  # 압축 모드 아이콘
+            prompt_text = f"[ {current_session_name} {mode_indicator} {files_info}{compact_indicator}] Q>> "
             user_in = session.prompt(prompt_text).strip()
         except (EOFError, KeyboardInterrupt):
             console.print()
@@ -1579,7 +2373,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
 
             editor = os.environ.get("EDITOR", "vim")
             console.print(f"[dim]외부 편집기 ({editor})를 실행합니다...[/dim]")
-            
+
             try:
                 # 사용자가 편집기를 닫을 때까지 대기합니다.
                 subprocess.run([editor, str(temp_file_path)], check=True)
@@ -1617,7 +2411,42 @@ def chat_mode(name: str, copy_clip: bool) -> None:
             cmd, *args = user_in.split()
             if cmd == "/exit":
                 break
-            if cmd == "/pretty_print":
+            elif cmd == "/compact_mode":
+                compact_mode = not compact_mode
+                status = "[green]활성화[/green]" if compact_mode else "[yellow]비활성화[/yellow]"
+                console.print(f"첨부파일 압축 모드가 {status}되었습니다.")
+                console.print("[dim]활성화 시: 과거 메시지의 첨부파일이 파일명만 남고 제거됩니다.[/dim]")
+                continue
+            elif cmd == "/show_context":
+                # 기존 코드에 usage_history 정보 추가
+                total_tokens = 0
+                image_count = 0
+                
+                # ... (기존 코드)
+                
+                # usage_history 통계 추가
+                if usage_history:
+                    actual_count = sum(1 for u in usage_history if not u.get("estimated"))
+                    estimated_count = sum(1 for u in usage_history if u.get("estimated"))
+                    total_used = sum(u.get("total_tokens", 0) for u in usage_history)
+                    
+                    console.print(Panel.fit(
+                        f"메시지: {len(messages)}개\n"
+                        f"이미지: {image_count}개\n"
+                        f"예상 토큰: {total_tokens:,}\n"
+                        f"모델 한계: {model_context:,}\n"
+                        f"사용률: {(total_tokens/model_context)*100:.1f}%\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"실제 API 호출: {actual_count}회\n"
+                        f"추정 API 호출: {estimated_count}회\n"
+                        f"누적 토큰 사용: {total_used:,}",
+                        title="[cyan]컨텍스"))
+                continue
+            elif cmd == "/diff_code":
+                differ = CodeDiffer(attached, current_session_name, messages)
+                differ.start()
+                continue
+            elif cmd == "/pretty_print":
                 pretty_print_enabled = not pretty_print_enabled
                 status_text = "[green]활성화[/green]" if pretty_print_enabled else "[yellow]비활성화[/yellow]"
                 console.print(f"고급 출력(Rich) 모드가 {status_text} 되었습니다.")
@@ -1633,7 +2462,6 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 else:
                     console.print("[yellow]다시 표시할 이전 답변이 없습니다.[/yellow]")
                 continue
-
             elif cmd == "/raw":
                 last_assistant_message = get_last_assistant_message(messages)
                 if last_assistant_message:
@@ -1652,7 +2480,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 if new_model != old_model:
                     model = new_model
                     model_context = new_context
-                    save_session(current_session_name, messages, model, model_context)
+                    save_session(current_session_name, messages, model, model_context, usage_history)
                     console.print(f"[green]모델 변경: {old_model} → {model} (컨텍스트: {model_context})[/green]")
                 else:
                     console.print(f"[green]모델 변경없음: {model}[/green]")
@@ -1671,6 +2499,9 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 selector = FileSelector()
                 attached = selector.start()
                 console.print(f"[yellow]파일 {len(attached)}개 선택됨: {','.join(attached)}[/yellow]")
+                if attached:
+                    # 🎯 첨부 파일 토큰 분석 표시
+                    display_attachment_tokens(attached, compact_mode)
             elif cmd == "/files":
                 current_attached_paths = set(Path(p) for p in attached)
                 newly_added_paths = set()
@@ -1713,11 +2544,13 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 if attached:
                     display_paths = [str(Path(p).relative_to(BASE_DIR)) for p in attached]
                     console.print(f"[yellow]파일 {len(attached)}개 선택됨: {', '.join(display_paths)}[/yellow]")
+                    
+                    # 🎯 첨부 파일 토큰 분석 표시
+                    display_attachment_tokens(attached, compact_mode)
                 else:
                     console.print("[yellow]선택된 파일이 없습니다.[/yellow]")
-
-                #attached = sorted(list(set(args)))
-                #console.print(f"[yellow]파일 {len(attached)}개 선택됨: {','.join(attached)}[/yellow]")
+                
+                
             elif cmd == "/clearfiles":
                 attached = []
             elif cmd == "/mode":
@@ -1736,7 +2569,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 new_mode = parsed_args.mode_name
                 
                 # 1. 모드/세션 변경 전, 현재 대화 내용 저장
-                save_session(current_session_name, messages, model, model_context)
+                save_session(current_session_name, messages, model, model_context, usage_history)
                 
                 # 2. 새로운 세션 이름 결정 (옵션 vs 기본값)
                 if parsed_args.session_name:
@@ -1761,6 +2594,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                     current_session_name = new_session_name
                     data = load_session(current_session_name)
                     messages = data["messages"]
+                    usage_history = data.get("usage_history",[])
                     if data["model"] != model:
                         model = data["model"]
                         console.print(f"[cyan]세션에 저장된 모델로 변경: {model}[/cyan]")
@@ -1778,6 +2612,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 if not current_session_path.exists():
                     console.print(f"[yellow]세션 '{current_session_name}'에 대한 저장된 파일이 없어 초기화할 내용이 없습니다.[/yellow]")
                     messages.clear() # 메모리만 초기화
+                    usage_history.clear()
                     continue
 
                 # 2. 백업 파일 경로를 생성합니다 (타임스탬프 포함).
@@ -1792,7 +2627,8 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 try:
                     shutil.move(str(current_session_path), str(backup_session_path))
                     messages.clear()
-                    save_session(current_session_name, messages, model, model_context)
+                    usage_history.clear()
+                    save_session(current_session_name, messages, model, model_context, usage_history)
 
                     backup_display_path = backup_session_path.relative_to(BASE_DIR)
                     console.print(
@@ -1837,26 +2673,33 @@ def chat_mode(name: str, copy_clip: bool) -> None:
             elif cmd == "/favs":
                 for k, v in load_favorites().items():
                     console.print(f"[cyan]{k}[/cyan]: {v[:80]}…")
+            elif cmd == "/show_context":
+                total_tokens = 0
+                image_count = 0
+                
+                for msg in messages:
+                    msg_str = json.dumps(msg, ensure_ascii=False)
+                    
+                    if isinstance(msg.get("content"), list):
+                        for part in msg["content"]:
+                            if part.get("type") == "image_url":
+                                image_count += 1
+                                # 이미지 토큰 추정
+                                if "base64," in part["image_url"]["url"]:
+                                    base64_part = part["image_url"]["url"].split("base64,")[1]
+                                    total_tokens += token_estimator.estimate_image_tokens(base64_part)
+                    
+                    total_tokens += len(msg_str) // 4
+                
+                console.print(Panel.fit(
+                    f"메시지: {len(messages)}개\n"
+                    f"이미지: {image_count}개\n"
+                    f"예상 토큰: {total_tokens:,}\n"
+                    f"모델 한계: {model_context:,}\n"
+                    f"사용률: {(total_tokens/model_context)*100:.1f}%",
+                    title="[cyan]컨텍스트 사용량[/cyan]"
+                ))
             
-            elif cmd == "/diffme":
-                if not attached or not last_resp:
-                    console.print("[yellow]비교 대상 없음[/yellow]")
-                    continue
-                for f in attached:
-                    p = Path(f)
-                    if p.suffix.lower() in PLAIN_EXTS:
-                        original = read_plain_file(p)
-                        for lang, code in extract_code_blocks(last_resp):
-                            render_diff(original, code, lang or "text")
-            elif cmd == "/diffcode":
-                if len(messages) < 4:
-                    console.print("[yellow]비교할 GPT 응답이 부족[/yellow]")
-                    continue
-                old = messages[-4]["content"]
-                for (ln_old, code_old), (ln_new, code_new) in zip(
-                    extract_code_blocks(old), extract_code_blocks(last_resp)
-                ):
-                    render_diff(code_old, code_new, ln_new or ln_old or "text")
             else:
                 console.print("[yellow]알 수 없는 명령[/yellow]")
             continue  # 명령어 처리 끝
@@ -1864,23 +2707,184 @@ def chat_mode(name: str, copy_clip: bool) -> None:
         # ── 파일 첨부 포함 user message 생성
         msg_obj: Dict[str, Any]
         if attached:
-            parts = [{"type": "text", "text": user_in}]
+            parts = []
+        
+            # 첨부 파일 정보를 먼저 텍스트로 명시
+            file_info_lines = ["📎 첨부 파일 목록:"]
+            image_count = 0
+            pdf_count = 0
+            image_files = []
+            pdf_files = []
             for f in attached:
-                parts.append(prepare_content_part(Path(f)))
+                path = Path(f)
+                if path.suffix.lower() in IMG_EXTS:
+                    image_files.append(path)
+                    image_count += 1
+                elif path.suffix.lower() == PDF_EXT:
+                    pdf_files.append(path)
+                    pdf_count += 1
+                    
+            # 사용자 입력과 파일 정보를 함께 전송
+            combined_text = user_in
+            if image_count > 0:
+                if image_count == 1:
+                    combined_text += f"\n\n[첨부이미지정보: image_name={image_files[0].name}]"
+                else:
+                    combined_text += f"\n\n[첨부이미지들 정보"
+                    for i, img_path in enumerate(image_files, 1):
+                        combined_text += f"\n  {i}번: image_name={img_path.name}"
+                    combined_text += "]"
+
+            if pdf_count > 0:
+                if pdf_count == 1:
+                    combined_text += f"\n\n[첨부pdf정보: pdf_name={pdf_files[0].name}]"
+                else:
+                    combined_text += f"\n\n[첨부pdf들 정보"
+                    for i, pdf_path in enumerate(pdf_files, 1):
+                        combined_text += f"\n  {i}번: pdf_name={pdf_path.name}"
+                    combined_text += "]"
+            
+
+            parts.append({"type": "text", "text": combined_text})
+            
+            # 실제 파일 컨텐츠 추가
+            for f in attached:
+                content = prepare_content_part(Path(f))
+                parts.append(content)
+            
             msg_obj = {"role": "user", "content": parts}
+            
         else:
             msg_obj = {"role": "user", "content": user_in}
-
+        
         messages.append(msg_obj)
 
+        # ── Compact mode 처리 (API 전송용 메시지 별도 생성)
+        messages_to_send = messages.copy()  # 얕은 복사
+        
+        if compact_mode:
+            # 과거 메시지들의 첨부파일을 플레이스홀더로 변환
+            compressed_messages = []
+            for i, msg in enumerate(messages_to_send):
+                # 마지막 메시지는 압축하지 않음 (현재 질문)
+                if i == len(messages_to_send) - 1:
+                    compressed_messages.append(msg)
+                elif msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                    # 첨부파일이 있는 과거 user 메시지를 압축
+                    compressed_msg = convert_to_placeholder_message(msg)
+                    compressed_messages.append(compressed_msg)
+                else:
+                    compressed_messages.append(msg)
+            
+            messages_to_send = compressed_messages
+            
+            # 압축 효과 계산 및 표시
+            if attached and i < len(messages_to_send) - 1:
+                original_tokens = estimate_message_tokens(messages)
+                compressed_tokens = estimate_message_tokens(messages_to_send)
+                saved_tokens = original_tokens - compressed_tokens
+                
+                console.print(
+                    f"[dim]컨텍스트 압축: {saved_tokens:,} 토큰 절약됨[/dim]"
+                )
+        
+        '''
+        for msg in messages_to_send:
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                console.print(msg.get("content")[0])
+            #console.print(msg)
+            #sys.exit(0)
+        '''
+        #sys.exit(0)        
+
         # ── OpenRouter 호출
-        reply = ask_stream(messages, model, mode, model_context_limit=model_context, pretty_print=pretty_print_enabled)
-        if reply is None:
+        result = ask_stream(
+            messages_to_send, 
+            model, 
+            mode, 
+            model_context_limit=model_context, 
+            pretty_print=pretty_print_enabled,
+            current_attached_files=attached
+        )
+
+        
+        if result is None:
+            failed_usage = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "timestamp": time.time(),
+                "model": model,
+                "status": "failed",  # 실패 표시
+                "estimated": True
+            }
+            #usage_history.append(failed_usage)
             messages.pop()  # 실패 시 user message 제거
             continue
 
+        reply, usage_info = result
+
+        # ✅ 여기에 토큰 추정 로직 추가
+        if not usage_info:
+            # API가 usage 정보를 제공하지 않은 경우, 수동으로 추정
+            console.print("[dim yellow]토큰 사용량을 추정합니다...[/dim yellow]")
+            
+            system_prompt_tokens = 0
+            if mode == "dev":
+                system_prompt_tokens = token_estimator.count_text_tokens("""당신은 터미널(CLI) 환경에 특화된...""")
+            elif mode == "general":
+                system_prompt_tokens = token_estimator.count_text_tokens("""당신은 매우 친절하고...""")
+            elif mode == "teacher":
+                system_prompt_tokens = token_estimator.count_text_tokens("""당신은 코드 분석의 대가...""")
+            
+            prompt_tokens = system_prompt_tokens
+            for msg in messages:
+                if isinstance(msg.get("content"), str):
+                    prompt_tokens += token_estimator.count_text_tokens(msg["content"])
+                elif isinstance(msg.get("content"), list):
+                    for part in msg["content"]:
+                        if part.get("type") == "text":
+                            prompt_tokens += token_estimator.count_text_tokens(part["text"])
+                        elif part.get("type") == "image_url":
+                            # 이미지 토큰 추정 (base64 길이 기반)
+                            if "base64," in part["image_url"]["url"]:
+                                base64_part = part["image_url"]["url"].split("base64,")[1]
+                                prompt_tokens += token_estimator.estimate_image_tokens(base64_part)
+            
+            # 응답의 토큰 계산
+            completion_tokens = token_estimator.count_text_tokens(reply or "")
+            
+            usage_info = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "timestamp": time.time(),
+                "model": model,
+                "estimated": True  # 추정값임을 표시
+            }
+            
+            console.print(
+                f"[dim yellow]추정 토큰: "
+                f"입력 {prompt_tokens:,} + "
+                f"출력 {completion_tokens:,} = "
+                f"총 {prompt_tokens + completion_tokens:,}[/dim yellow]"
+            )
+
+        
+        if usage_info:
+            #usage_history.append(usage_info)
+            
+            # 실시간 사용량 표시
+            console.print(
+                f"[dim]토큰 사용: "
+                f"입력 {usage_info['prompt_tokens']:,} + "
+                f"출력 {usage_info['completion_tokens']:,} = "
+                f"총 {usage_info['total_tokens']:,}[/dim]"
+            )
+
+        usage_history.append(usage_info)
         messages.append({"role": "assistant", "content": reply})
-        save_session(current_session_name, messages, model, model_context)
+        save_session(current_session_name, messages, model, model_context, usage_history)
         last_resp = reply
 
         # ── 후처리
