@@ -2184,7 +2184,8 @@ COMMANDS = """
 /favs                         → 즐겨찾기 목록
 /edit                         → 외부 편집기로 긴 질문 작성
 /diff_code                    → 코드 블록 비교 뷰어 열기
-/reset                        → 세션 리셋
+/reset                        → 세션 리셋 & 자동 백업
+/restore                      → 백업에서 세션 복원
 /show_context                 → 현재 컨텍스트 사용량 확인
 /exit                         → 종료
 """.strip()
@@ -2604,44 +2605,233 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 console.print(f"[green]전환 완료. 현재 모드: [bold]{mode}[/bold], 세션: [bold]{current_session_name}[/bold][/green]")
                 
             elif cmd == "/reset":
-                #messages.clear()
-                #console.print("[yellow]세션 초기화[/yellow]")
                 # 1. 현재 세션 파일 경로를 가져옵니다.
                 current_session_path = SESSION_DIR / f"session_{current_session_name}.json"
-
-                if not current_session_path.exists():
-                    console.print(f"[yellow]세션 '{current_session_name}'에 대한 저장된 파일이 없어 초기화할 내용이 없습니다.[/yellow]")
-                    messages.clear() # 메모리만 초기화
-                    usage_history.clear()
-                    continue
-
-                # 2. 백업 파일 경로를 생성합니다 (타임스탬프 포함).
+                
+                # 2. 백업 디렉터리 생성
                 backup_dir = SESSION_DIR / "backup"
                 backup_dir.mkdir(exist_ok=True)
-
+                
                 timestamp = time.strftime("%Y%m%d_%H%M%S")
-
-                backup_filename = f"session_{current_session_name}_{timestamp}.json"
-                backup_session_path = backup_dir / backup_filename
-
-                try:
-                    shutil.move(str(current_session_path), str(backup_session_path))
-                    messages.clear()
-                    usage_history.clear()
-                    save_session(current_session_name, messages, model, model_context, usage_history)
-
-                    backup_display_path = backup_session_path.relative_to(BASE_DIR)
+                
+                # 3. 세션 파일 백업
+                session_backup_success = False
+                if current_session_path.exists():
+                    backup_filename = f"session_{current_session_name}_{timestamp}.json"
+                    backup_session_path = backup_dir / backup_filename
+                    
+                    try:
+                        shutil.move(str(current_session_path), str(backup_session_path))
+                        session_backup_success = True
+                    except Exception as e:
+                        console.print(f"[red]세션 백업 실패: {e}[/red]")
+                
+                # 4. 🎯 gpt_codes 폴더의 코드 블록 파일들 백업
+                code_backup_dir = CODE_OUTPUT_DIR / "backup" / f"{current_session_name}_{timestamp}"
+                code_files_backed_up = []
+                
+                if CODE_OUTPUT_DIR.exists():
+                    # 현재 세션과 관련된 코드 파일들 찾기
+                    pattern = f"codeblock_{current_session_name}_*"
+                    matching_files = list(CODE_OUTPUT_DIR.glob(pattern))
+                    
+                    if matching_files:
+                        code_backup_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        for code_file in matching_files:
+                            try:
+                                # 파일을 백업 디렉터리로 이동
+                                backup_path = code_backup_dir / code_file.name
+                                shutil.move(str(code_file), str(backup_path))
+                                code_files_backed_up.append(code_file.name)
+                            except Exception as e:
+                                console.print(f"[yellow]코드 파일 백업 실패 ({code_file.name}): {e}[/yellow]")
+                
+                # 5. 메모리 초기화
+                messages.clear()
+                usage_history.clear()
+                save_session(current_session_name, messages, model, model_context, usage_history)
+                
+                # 6. 결과 보고
+                if session_backup_success or code_files_backed_up:
+                    backup_info = []
+                    
+                    if session_backup_success:
+                        session_display_path = backup_session_path.relative_to(BASE_DIR)
+                        backup_info.append(f"[green]세션 데이터:[/green]\n  {session_display_path}")
+                    
+                    if code_files_backed_up:
+                        code_display_path = code_backup_dir.relative_to(BASE_DIR)
+                        backup_info.append(
+                            f"[green]코드 파일 {len(code_files_backed_up)}개:[/green]\n  {code_display_path}/"
+                        )
+                        
+                        # 백업된 파일 목록 표시 (최대 5개)
+                        for i, filename in enumerate(code_files_backed_up[:5]):
+                            backup_info.append(f"    • {filename}")
+                        if len(code_files_backed_up) > 5:
+                            backup_info.append(f"    ... 외 {len(code_files_backed_up) - 5}개")
+                    
                     console.print(
-                        Panel.fit(
-                            f"세션 '{current_session_name}'이 초기화되었습니다.\n"
-                            f"[dim]이전 데이터는 아래 경로에 백업되었습니다:[/dim]\n"
-                            f"[green]{backup_display_path}[/green]",
-                            title="[yellow]세션 초기화 및 백업 완료[/yellow]"
+                        Panel(
+                            f"세션 '{current_session_name}'이 초기화되었습니다.\n\n"
+                            f"[bold]백업 위치:[/bold]\n" + "\n".join(backup_info),
+                            title="[yellow]✅ 세션 초기화 및 백업 완료[/yellow]",
+                            border_style="green"
                         )
                     )
+                else:
+                    console.print(f"[yellow]세션 '{current_session_name}'이 초기화되었습니다. (백업할 데이터 없음)[/yellow]")
+                
+                continue
+            elif cmd == "/restore":
+                # 백업 디렉터리 확인
+                backup_dir = SESSION_DIR / "backup"
+                if not backup_dir.exists():
+                    console.print("[yellow]백업 파일이 없습니다.[/yellow]")
+                    continue
+                
+                # 현재 세션의 백업 파일들 찾기
+                backup_pattern = f"session_{current_session_name}_*.json"
+                backup_files = sorted(backup_dir.glob(backup_pattern), reverse=True)
+                
+                if not backup_files:
+                    console.print(f"[yellow]세션 '{current_session_name}'의 백업이 없습니다.[/yellow]")
+                    continue
+                
+                # TUI로 백업 선택
+                def select_backup():
+                    items = []
+                    result = [None]
+                    
+                    def raise_exit(backup_file):
+                        result[0] = backup_file
+                        raise urwid.ExitMainLoop()
+                    
+                    header = urwid.Text([
+                        ("bold", f"세션 '{current_session_name}' 백업 목록"),
+                        "\n",
+                        ("info", "Enter로 선택, Q로 취소")
+                    ])
+                    items = [header, urwid.Divider()]
+                    
+                    for backup_file in backup_files[:20]:  # 최대 20개 표시
+                        # 타임스탬프 파싱
+                        timestamp_str = backup_file.stem.split('_')[-2] + '_' + backup_file.stem.split('_')[-1]
+                        try:
+                            # 타임스탬프를 읽기 쉬운 형식으로 변환
+                            dt = time.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+                            display_time = time.strftime("%Y-%m-%d %H:%M:%S", dt)
+                        except:
+                            display_time = timestamp_str
+                        
+                        # 백업 파일 크기 확인
+                        file_size = backup_file.stat().st_size / 1024  # KB
+                        
+                        # 백업 내용 미리보기 (메시지 개수 확인)
+                        try:
+                            with open(backup_file, 'r', encoding='utf-8') as f:
+                                backup_data = json.load(f)
+                                msg_count = len(backup_data.get("messages", []))
+                                model_info = backup_data.get("model", "unknown")
+                                
+                                # 토큰 사용량 정보가 있으면 표시
+                                total_usage = backup_data.get("total_usage", {})
+                                total_tokens = total_usage.get("total_tokens", 0)
+                                
+                                label = f"📅 {display_time} | 💬 {msg_count}개 메시지 | 🤖 {model_info.split('/')[-1]} | 🔢 {total_tokens:,} 토큰 | 📦 {file_size:.1f}KB"
+                        except:
+                            label = f"📅 {display_time} | 📦 {file_size:.1f}KB"
+                        
+                        btn = urwid.Button(label)
+                        urwid.connect_signal(btn, "click", lambda _, f=backup_file: raise_exit(f))
+                        items.append(urwid.AttrMap(btn, None, focus_map="myfocus"))
+                    
+                    listbox = urwid.ListBox(urwid.SimpleFocusListWalker(items))
+                    
+                    def unhandled(key):
+                        if isinstance(key, str) and key.lower() == "q":
+                            raise_exit(None)
+                    
+                    urwid.MainLoop(listbox, palette=PALETTE, unhandled_input=unhandled).run()
+                    return result[0]
+                
+                selected_backup = select_backup()
+                
+                if not selected_backup:
+                    console.print("[dim]복원이 취소되었습니다.[/dim]")
+                    continue
+                
+                # 현재 세션을 백업 (복원 전 안전장치)
+                if messages:  # 현재 내용이 있으면 백업
+                    safety_backup_dir = SESSION_DIR / "backup" / "pre_restore"
+                    safety_backup_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    safety_backup_path = safety_backup_dir / f"session_{current_session_name}_pre_restore_{timestamp}.json"
+                    
+                    save_json(safety_backup_path, {
+                        "messages": messages,
+                        "model": model,
+                        "context_length": model_context,
+                        "usage_history": usage_history,
+                        "note": "자동 생성된 복원 전 백업"
+                    })
+                
+                # 백업 파일에서 데이터 로드
+                try:
+                    restored_data = load_json(selected_backup, {})
+                    
+                    # 세션 데이터 복원
+                    messages = restored_data.get("messages", [])
+                    model = restored_data.get("model", model)
+                    model_context = restored_data.get("context_length", model_context)
+                    usage_history = restored_data.get("usage_history", [])
+                    
+                    # 현재 세션에 저장
+                    save_session(current_session_name, messages, model, model_context, usage_history)
+                    
+                    # 코드 파일 복원 확인
+                    timestamp_str = selected_backup.stem.split('_')[-2] + '_' + selected_backup.stem.split('_')[-1]
+                    code_backup_dir = CODE_OUTPUT_DIR / "backup" / f"{current_session_name}_{timestamp_str}"
+                    
+                    restored_code_files = 0
+                    if code_backup_dir.exists():
+                        # 기존 코드 파일들 백업
+                        existing_code_files = list(CODE_OUTPUT_DIR.glob(f"codeblock_{current_session_name}_*"))
+                        if existing_code_files:
+                            pre_restore_code_dir = CODE_OUTPUT_DIR / "backup" / f"pre_restore_{time.strftime('%Y%m%d_%H%M%S')}"
+                            pre_restore_code_dir.mkdir(parents=True, exist_ok=True)
+                            for f in existing_code_files:
+                                shutil.move(str(f), str(pre_restore_code_dir / f.name))
+                        
+                        # 백업된 코드 파일들 복원
+                        for code_file in code_backup_dir.glob("*"):
+                            target_path = CODE_OUTPUT_DIR / code_file.name
+                            shutil.copy2(str(code_file), str(target_path))
+                            restored_code_files += 1
+                    
+                    # 결과 보고
+                    console.print(
+                        Panel(
+                            f"[green]✅ 복원 완료![/green]\n\n"
+                            f"복원된 데이터:\n"
+                            f"• 메시지: {len(messages)}개\n"
+                            f"• 모델: {model}\n"
+                            f"• 컨텍스트: {model_context:,}\n"
+                            f"• 코드 파일: {restored_code_files}개\n\n"
+                            f"[dim]원본: {selected_backup.relative_to(BASE_DIR)}[/dim]",
+                            title="[green]세션 복원 성공[/green]",
+                            border_style="green"
+                        )
+                    )
+                    
+                    # 첨부 파일 초기화
+                    attached = []
+                    
                 except Exception as e:
-                    console.print(f"[bold red]오류: 세션 초기화 및 백업에 실패했습니다.[/bold red]")
-                    console.print(f"[dim]{e}[/dim]")
+                    console.print(f"[red]복원 실패: {e}[/red]")
+                    continue
 
             elif cmd == "/savefav" and args:
                 if messages and messages[-1]["role"] == "user":
