@@ -207,6 +207,13 @@ PALETTE.extend([
     ('diff_sign_ctx', 'dark gray',   'default'),
 ])
 
+# PALETTE 정의 이후 어느 곳이든 추가
+PALETTE.extend([
+    ('diff_lno_old', 'light red',   'default'),
+    ('diff_lno_new', 'light green', 'default'),
+    ('diff_sep',     'dark gray',   'default'),
+])
+
 #TRIMMED_HISTORY = 20
 DEFAULT_CONTEXT_LENGTH = 200000
 CONTEXT_TRIM_RATIO = 0.7
@@ -309,20 +316,27 @@ def make_gutter(old_no: Optional[int], new_no: Optional[int], digits_old: int, d
         ('pack', bar),
     ], dividechars=0)
 
-def build_preview_line_markup_with_sign(path: Path,
-                                        line_text: str,
-                                        line_no: int,
-                                        digits: int,
-                                        sign: str,
-                                        lexer=None) -> List:
+# 위치: 기존 build_preview_line_markup_with_sign 아래 또는 유틸 섹션 가까이에 추가
+def build_diff_line_markup_preview_style(
+    path: Path,
+    line_text: str,
+    old_no: Optional[int],
+    new_no: Optional[int],
+    digits_old: int,
+    digits_new: int,
+    sign: str,
+    lexer=None
+) -> List:
     """
-    preview 스타일로 한 줄을 마크업으로 생성.
-    - 앞쪽에 [+/-/ ] 기호를 단 한 번 표시
-    - 그 다음 줄번호를 고정폭으로 표시
-    - ASCII 구분자 '| ' 사용
-    - 그 이후 코드 본문은 syn_* 토큰으로 문법 하이라이트
+    preview 스타일 기반으로 diff 한 줄을 구성:
+    [sign] [old_lno] [new_lno] | [code...]
+    - sign: '+', '-', ' ' (색상은 diff_sign_*)
+    - old/new 라인 번호는 서로 다른 색(diff_lno_old/new)
+    - 구분자는 ASCII '| ' (폭 안정)
+    - 코드 본문은 syn_* 토큰(미리보기와 동일)을 사용
+    - 줄바꿈/CR 제거, 탭은 expandtabs(4) (기존 래퍼/정책 사용)
     """
-    # 기호 색
+    # sign 색상
     if sign == '+':
         sign_attr = 'diff_sign_add'
     elif sign == '-':
@@ -330,20 +344,28 @@ def build_preview_line_markup_with_sign(path: Path,
     else:
         sign_attr = 'diff_sign_ctx'
 
-    # 줄번호/코드 토큰화
+    # lexer 준비 (기존 정책 유지)
     try:
         if lexer is None:
             lexer = _get_lexer_for_path(path)
     except Exception:
         lexer = TextLexer()
 
-    # 탭 고정폭으로 변환(정렬 안정화)
+    # 탭 고정 폭 변환만 수행(기존 정책 유지, 줄바꿈 제거는 lex_line_no_newlines에서 일괄 처리)
     safe_line = line_text.expandtabs(4)
 
     parts: List = []
+    # [sign]
     parts.append((sign_attr, f"{sign} "))
-    parts.append(('syn_lno', f"{line_no:>{digits}} │ "))
+    # [old_lno] [new_lno]
+    old_s = f"{old_no}" if old_no is not None else ""
+    new_s = f"{new_no}" if new_no is not None else ""
+    parts.append(('diff_lno_old', f"{old_s:>{digits_old}} "))
+    parts.append(('diff_lno_new', f"{new_s:>{digits_new}} "))
+    # 구분자
+    parts.append(('diff_sep', "│ "))
 
+    # 코드 토큰(미리보기 토큰 팔레트 syn_* 사용)
     try:
         for ttype, value in lex_line_no_newlines(lexer, safe_line):
             parts.append((_tok_to_attr(ttype), value))
@@ -430,7 +452,6 @@ def build_syntax_markup_for_preview(path: Path, start_line: int, end_line: int) 
 
     markup: List[Any] = []
     for idx in range(start, end):
-        # 줄번호 + ASCII 구분자
         lno = f"{idx+1:>{digits}} │ "
         markup.append(('syn_lno', lno))
 
@@ -1720,27 +1741,27 @@ class CodeDiffer:
                 i += 1
                 continue
 
-            # 행 렌더러(“미리보기 스타일 + 기호만 표시”)
-            def emit(sign: str, ln: Optional[int], content: str):
-                ln_show = ln if ln is not None else 0  # None이면 0 출력
-                markup = build_preview_line_markup_with_sign(
-                    path=new_item['path'],  # lexer 참조용(언어 추정 동일)
+            
+            # 행 렌더러: 두 개 라인 번호 + 기호 + preview 토큰
+            def emit(sign: str, old_no: Optional[int], new_no: Optional[int], content: str):
+                markup = build_diff_line_markup_preview_style(
+                    path=new_item['path'],
                     line_text=content,
-                    line_no=ln_show,
-                    digits=digits,
+                    old_no=old_no,
+                    new_no=new_no,
+                    digits_old=digits_old,
+                    digits_new=digits_new,
                     sign=sign,
                     lexer=lexer
                 )
                 widgets.append(urwid.Text(markup, wrap='clip'))
 
-            # '-' 다음이 '+'인 페어 → 두 줄 연속 출력(인라인 강조는 생략, preview 스타일에 집중)
+            # '-' 다음이 '+' 페어: 두 줄 연속
             if line.startswith('-') and i + 1 < len(diff) and diff[i+1].startswith('+'):
                 old_line = line[1:]
                 new_line = diff[i+1][1:]
-
-                emit('-', old_ln, old_line)
-                emit('+', new_ln, new_line)
-
+                emit('-', old_ln, None, old_line)
+                emit('+', None, new_ln, new_line)
                 if old_ln is not None: old_ln += 1
                 if new_ln is not None: new_ln += 1
                 i += 2
@@ -1748,22 +1769,16 @@ class CodeDiffer:
 
             # 단일 라인들
             if line.startswith('-'):
-                content = line[1:]
-                emit('-', old_ln, content)
+                emit('-', old_ln, None, line[1:])
                 if old_ln is not None: old_ln += 1
-
             elif line.startswith('+'):
-                content = line[1:]
-                emit('+', new_ln, content)
+                emit('+', None, new_ln, line[1:])
                 if new_ln is not None: new_ln += 1
-
-            elif line.startswith(('---', '+++')):
+            elif line.startswith(('---','+++')):
                 widgets.append(urwid.Text(('diff_meta', line), wrap='clip'))
-
             else:
-                # 컨텍스트 라인(' ' 포함)
                 content = line[1:] if line.startswith(' ') else line
-                emit(' ', new_ln, content)  # 보기 중심을 “신규 기준”으로 통일
+                emit(' ', old_ln, new_ln, content)
                 if old_ln is not None: old_ln += 1
                 if new_ln is not None: new_ln += 1
 
