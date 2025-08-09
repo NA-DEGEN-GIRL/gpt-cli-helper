@@ -15,7 +15,7 @@ import time
 import subprocess
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Set
 from typing import Union  # FileSelector 타입 힌트용
 
 # ── 3rd-party
@@ -991,6 +991,7 @@ PDF_EXT = ".pdf"
 
 SENSITIVE_KEYS = ["secret", "private", "key", "api"]
 
+# PALETTE 정의 수정 (line 100 근처)
 PALETTE = [                               
     ('key', 'yellow', 'black'),
     ('info', 'dark gray', 'black'),
@@ -1000,11 +1001,11 @@ PALETTE = [
     # Diff 뷰를 위한 스타일 추가
     ('diff_add', 'black', 'dark green'),
     ('diff_remove', 'black', 'dark red'),
-    ('header', 'white', 'dark blue'),
-     # Response 관련 - 배경색 제거 또는 black으로 변경
-    ('response_header', 'white,bold', 'black'),  # 'dark blue' -> 'black'
-    ('response_selected', 'black', 'light gray'),  # 선택된 항목만 회색 배경
-    ('response_normal', 'light gray', 'black'),   # 일반 항목은 검정 배경
+    ('header', 'white', 'black'),  # ⚠️ 수정: 'dark blue' -> 'black'으로 변경
+    # Response 관련 - 배경색 제거 또는 black으로 변경
+    ('response_header', 'white,bold', 'black'),
+    ('response_selected', 'black', 'light gray'),
+    ('response_normal', 'light gray', 'black'),
     
     # 파일 관련
     ('file_selected', 'black', 'light gray'),
@@ -1015,18 +1016,21 @@ PALETTE = [
     ('preview_border', 'dark gray', 'black')
 ]
 
-
-
 class CodeDiffer:
     def __init__(self, attached_files: List[str], session_name: str, messages: List[Dict]):
+        # 입력 데이터
         self.attached_files = [Path(p) for p in attached_files]
         self.session_name = session_name
+        self.messages = messages
+
+        # 상태
         self.expanded_items: Set[str] = set()
         self.selected_for_diff: List[Dict] = []
         self.previewing_item_id: Optional[str] = None
         self.preview_offset = 0
-        self.preview_lines_per_page = 10  # 한 페이지에 표시할 라인 수
-        
+        self.preview_lines_per_page = 10
+
+        # 표시/리스트 구성
         self.display_items: List[Dict] = []
         self.response_files: Dict[int, List[Path]] = self._scan_response_files()
 
@@ -1034,157 +1038,41 @@ class CodeDiffer:
         self.listbox = urwid.ListBox(self.list_walker)
         self.preview_text = urwid.Text("")
         self.preview_box = urwid.LineBox(self.preview_text, title="Preview")
-        
-        # 주 레이아웃은 Pile을 사용하되, 미리보기는 동적으로 추가/제거
+
         self.main_pile = urwid.Pile([self.listbox])
-        
-        # 키 도움말 업데이트
         footer_text = "↑/↓:이동 | Enter:확장/프리뷰 | Space:선택 | D:Diff | Q:종료 | PgUp/Dn:스크롤"
         self.footer = urwid.AttrMap(urwid.Text(footer_text), 'header')
-        
         self.frame = urwid.Frame(self.main_pile, footer=self.footer)
         self.main_loop: Optional[urwid.MainLoop] = None
-        
-        # diff 뷰 관련 추가
-        self.diff_scroll_offset = 0
-        self.diff_widget: Optional[urwid.Widget] = None
 
-    def _scan_response_files(self) -> Dict[int, List[Path]]:
-        if not CODE_OUTPUT_DIR.is_dir(): return {}
-        pattern = re.compile(rf"codeblock_{re.escape(self.session_name)}_(\d+)_.*")
-        msg_files: Dict[int, List[Path]] = {}
-        for p in CODE_OUTPUT_DIR.glob(f"codeblock_{self.session_name}_*"):
-            match = pattern.match(p.name)
-            if match:
-                msg_id = int(match.group(1))
-                if msg_id not in msg_files: msg_files[msg_id] = []
-                msg_files[msg_id].append(p)
-        return {k: sorted(v) for k, v in sorted(msg_files.items(), reverse=True)}
+        # diff 뷰 복귀/복원용
+        self._old_input_filter = None
+        self._old_unhandled_input = None
+        self._old_widget = None
 
-    def _render_all(self, keep_focus=True):
-        pos = 0
-        if keep_focus:
-            try: pos = self.listbox.focus_position
-            except IndexError: pos = 0
-        
-        self.display_items = []
-        widgets = []
-        if self.attached_files:
-            section_id = "local_files"
-            arrow = "▼" if section_id in self.expanded_items else "▶"
-            widgets.append(urwid.AttrMap(urwid.SelectableIcon(f"{arrow} Current Local Files ({len(self.attached_files)})"), 'header', 'header'))
-            self.display_items.append({"id": section_id, "type": "section"})
-            if section_id in self.expanded_items:
-                for p in self.attached_files:
-                    checked = "✔" if any(s.get("path") == p for s in self.selected_for_diff) else " "
-                    item_id = f"local_{p.name}"
-                    widgets.append(urwid.AttrMap(urwid.SelectableIcon(f"  [{checked}] {p.name}"), '', 'myfocus'))
-                    self.display_items.append({"id": item_id, "type": "file", "path": p, "source": "local"})
-
-        for msg_id, files in self.response_files.items():
-            section_id = f"response_{msg_id}"
-            arrow = "▼" if section_id in self.expanded_items else "▶"
-            widgets.append(urwid.AttrMap(urwid.SelectableIcon(f"{arrow} Response #{msg_id}"), 'header', 'header'))
-            self.display_items.append({"id": section_id, "type": "section"})
-            if section_id in self.expanded_items:
-                for p in files:
-                    checked = "✔" if any(s.get("path") == p for s in self.selected_for_diff) else " "
-                    item_id = f"response_{msg_id}_{p.name}"
-                    widgets.append(urwid.AttrMap(urwid.SelectableIcon(f"  [{checked}] {p.name}"), '', 'myfocus'))
-                    self.display_items.append({"id": item_id, "type": "file", "path": p, "source": "response", "msg_id": msg_id})
-
-        self.list_walker[:] = widgets
-        if widgets: self.listbox.focus_position = min(pos, len(widgets) - 1)
-        self._update_preview()
-
-    def _update_preview(self):
-        item_id = self.previewing_item_id
-        is_previewing = len(self.main_pile.contents) > 1
-
-        if not item_id:
-            if is_previewing: self.main_pile.contents.pop()
+    # ─────────────────────────────────────────────
+    # (추가) 프리뷰 스크롤 헬퍼
+    # ─────────────────────────────────────────────
+    def _scroll_preview(self, key: str) -> None:
+        if not self.previewing_item_id:
             return
-
-        item_data = next((item for item in self.display_items if item.get('id') == item_id), None)
-        if not (item_data and item_data['type'] == 'file'):
-            if is_previewing: self.main_pile.contents.pop()
-            return
-            
         try:
+            item_data = next(item for item in self.display_items if item.get('id') == self.previewing_item_id)
             content = item_data['path'].read_text(encoding='utf-8', errors='ignore').splitlines()
-            
-            # 스크롤 가능한 범위 계산
             total_lines = len(content)
-            end_line = min(self.preview_offset + self.preview_lines_per_page, total_lines)
-            
-            preview_text = "\n".join(content[self.preview_offset : end_line])
-            
-            # 스크롤 정보를 타이틀에 표시
-            scroll_info = f" [{self.preview_offset+1}-{end_line}/{total_lines}]"
-            title = f"Preview: {item_data['path'].name}{scroll_info}"
-            
-            self.preview_box.set_title(title)
-            self.preview_text.set_text(preview_text)
-            
-            if not is_previewing:
-                self.main_pile.contents.insert(0, (self.preview_box, self.main_pile.options('pack')))
-        except Exception as e:
-            self.preview_text.set_text(f"[Error]: {e}")
-            if not is_previewing:
-                self.main_pile.contents.insert(0, (self.preview_box, self.main_pile.options('pack')))
-    
-    def handle_input(self, key):
-        if not isinstance(key, str): return
+            max_offset = max(0, total_lines - self.preview_lines_per_page)
 
-        # 프리뷰 스크롤 처리
-        if self.previewing_item_id and key in ('page up', 'page down'):
-            try:
-                item_data = next(item for item in self.display_items if item.get('id') == self.previewing_item_id)
-                content = item_data['path'].read_text('utf-8').splitlines()
-                total_lines = len(content)
-                max_offset = max(0, total_lines - self.preview_lines_per_page)
-                
-                if key == 'page down':
-                    # 한 페이지 아래로 스크롤
-                    self.preview_offset = min(max_offset, self.preview_offset + self.preview_lines_per_page)
-                elif key == 'page up':
-                    # 한 페이지 위로 스크롤
-                    self.preview_offset = max(0, self.preview_offset - self.preview_lines_per_page)
-                
-                self._update_preview()
-            except (StopIteration, IOError): pass
-            return
+            if key == 'page down':
+                self.preview_offset = min(max_offset, self.preview_offset + self.preview_lines_per_page)
+            elif key == 'page up':
+                self.preview_offset = max(0, self.preview_offset - self.preview_lines_per_page)
 
-        try:
-            pos = self.listbox.focus_position
-            item = self.display_items[pos]
-        except IndexError:
-            self.frame.keypress(self.main_loop.screen_size, key)
-            return
+            self._update_preview()
+        except StopIteration:
+            pass
+        except IOError:
+            pass
 
-        if key == 'q': raise urwid.ExitMainLoop()
-        
-        elif key == 'enter':
-            if item['type'] == 'section':
-                self.expanded_items.symmetric_difference_update({item['id']})
-            elif item['type'] == 'file':
-                item_id = item['id']
-                self.previewing_item_id = None if self.previewing_item_id == item_id else item_id
-                self.preview_offset = 0
-            self._render_all()
-        
-        elif key == ' ':
-            if item['type'] == 'file':
-                self.handle_selection(item)
-                self._render_all(keep_focus=True)
-
-        elif key.lower() == 'd':
-            if len(self.selected_for_diff) == 2: self._show_diff_view()
-            else: self.footer.original_widget.set_text(f"[!] 2개 항목을 선택해야 diff가 가능합니다. (현재 {len(self.selected_for_diff)}개 선택됨)")
-        
-        else:
-            self.frame.keypress(self.main_loop.screen_size, key)
-    
     def handle_selection(self, item):
         is_in_list = any(s['id'] == item['id'] for s in self.selected_for_diff)
         if not is_in_list:
@@ -1197,119 +1085,326 @@ class CodeDiffer:
         else:
             self.selected_for_diff = [s for s in self.selected_for_diff if s['id'] != item['id']]
         self.footer.original_widget.set_text(f" {len(self.selected_for_diff)}/2 선택됨. 'd' 키를 눌러 diff를 실행하세요.")
+
+    def _scan_response_files(self) -> Dict[int, List[Path]]:
+        if not CODE_OUTPUT_DIR.is_dir(): return {}
+        pattern = re.compile(rf"codeblock_{re.escape(self.session_name)}_(\d+)_.*")
+        msg_files: Dict[int, List[Path]] = {}
+        for p in CODE_OUTPUT_DIR.glob(f"codeblock_{self.session_name}_*"):
+            match = pattern.match(p.name)
+            if match:
+                msg_id = int(match.group(1))
+                if msg_id not in msg_files: msg_files[msg_id] = []
+                msg_files[msg_id].append(p)
+        return {k: sorted(v) for k, v in sorted(msg_files.items(), reverse=True)}
+    
+    def _render_all(self, keep_focus: bool = True):
+        pos = 0
+        if keep_focus:
+            try:
+                pos = self.listbox.focus_position
+            except IndexError:
+                pos = 0
+
+        self.display_items = []
+        widgets = []
+
+        # 로컬 파일 섹션
+        if self.attached_files:
+            section_id = "local_files"
+            arrow = "▼" if section_id in self.expanded_items else "▶"
+            widgets.append(
+                urwid.AttrMap(
+                    urwid.SelectableIcon(f"{arrow} Current Local Files ({len(self.attached_files)})"),
+                    'header', 'header'
+                )
+            )
+            self.display_items.append({"id": section_id, "type": "section"})
+            if section_id in self.expanded_items:
+                for p in self.attached_files:
+                    checked = "✔" if any(s.get("path") == p for s in self.selected_for_diff) else " "
+                    item_id = f"local_{p.name}"
+                    widgets.append(
+                        urwid.AttrMap(urwid.SelectableIcon(f"  [{checked}] {p.name}"), '', 'myfocus')
+                    )
+                    self.display_items.append({"id": item_id, "type": "file", "path": p, "source": "local"})
+
+        # response 파일 섹션
+        for msg_id, files in self.response_files.items():
+            section_id = f"response_{msg_id}"
+            arrow = "▼" if section_id in self.expanded_items else "▶"
+            widgets.append(
+                urwid.AttrMap(
+                    urwid.SelectableIcon(f"{arrow} Response #{msg_id}"),
+                    'header', 'header'
+                )
+            )
+            self.display_items.append({"id": section_id, "type": "section"})
+            if section_id in self.expanded_items:
+                for p in files:
+                    checked = "✔" if any(s.get("path") == p for s in self.selected_for_diff) else " "
+                    item_id = f"response_{msg_id}_{p.name}"
+                    widgets.append(
+                        urwid.AttrMap(urwid.SelectableIcon(f"  [{checked}] {p.name}"), '', 'myfocus')
+                    )
+                    self.display_items.append({"id": item_id, "type": "file", "path": p, "source": "response", "msg_id": msg_id})
+
+        self.list_walker[:] = widgets
+        if widgets:
+            self.listbox.focus_position = min(pos, len(widgets) - 1)
+
+        self._update_preview()
+
+    def _update_preview(self):
+        item_id = self.previewing_item_id
+        is_previewing = len(self.main_pile.contents) > 1
+
+        if not item_id:
+            if is_previewing:
+                self.main_pile.contents.pop()
+            return
+
+        item_data = next((it for it in self.display_items if it.get('id') == item_id), None)
+        if not (item_data and item_data['type'] == 'file'):
+            if is_previewing:
+                self.main_pile.contents.pop()
+            return
+
+        try:
+            lines = item_data['path'].read_text(encoding='utf-8', errors='ignore').splitlines()
+            total = len(lines)
+            start = self.preview_offset
+            end = min(start + self.preview_lines_per_page, total)
+            preview = "\n".join(lines[start:end])
+
+            info = f" [{start+1}-{end}/{total}]"
+            title = f"Preview: {item_data['path'].name}{info}"
+            self.preview_box.set_title(title)
+            self.preview_text.set_text(preview)
+
+            if not is_previewing:
+                # 프리뷰를 목록 하단에 배치(메뉴 가림 방지)
+                self.main_pile.contents.append((self.preview_box, self.main_pile.options('pack')))
+        except Exception as e:
+            self.preview_text.set_text(f"[Error]: {e}")
+            if not is_previewing:
+                self.main_pile.contents.append((self.preview_box, self.main_pile.options('pack')))
+
+
+    def _input_filter(self, keys, raw):
+        """
+        메인(리스트+프리뷰) 화면에서만 프리뷰 스크롤 키를 가로채 소비하여
+        ListBox가 포커스를 움직이지 못하게 한다.
+        """
+        try:
+            if self.main_loop and self.main_loop.widget is self.frame:
+                out = []
+                for k in keys:
+                    # 프리뷰가 열려있을 때 마우스 휠 처리 (반 페이지)
+                    if isinstance(k, tuple) and len(k) >= 2 and self.previewing_item_id:
+                        ev, btn = k[0], k[1]
+                        if ev == 'mouse press' and btn in (4, 5):
+                            try:
+                                it = next(x for x in self.display_items if x.get('id') == self.previewing_item_id)
+                                lines = it['path'].read_text(encoding='utf-8', errors='ignore').splitlines()
+                                total = len(lines)
+                                max_off = max(0, total - self.preview_lines_per_page)
+                                half = max(1, self.preview_lines_per_page // 2)
+                                if btn == 4:
+                                    self.preview_offset = max(0, self.preview_offset - half)
+                                else:
+                                    self.preview_offset = min(max_off, self.preview_offset + half)
+                                self._update_preview()
+                                try: self.main_loop.draw_screen()
+                                except Exception: pass
+                            except Exception:
+                                pass
+                            continue  # 소비
+
+                    # 키(문자열) 처리
+                    if isinstance(k, str) and self.previewing_item_id:
+                        kl = k.lower()
+                        handled = False
+                        if kl in ('page up', 'page down', 'home', 'end'):
+                            try:
+                                it = next(x for x in self.display_items if x.get('id') == self.previewing_item_id)
+                                lines = it['path'].read_text(encoding='utf-8', errors='ignore').splitlines()
+                                total = len(lines)
+                                max_off = max(0, total - self.preview_lines_per_page)
+                                half = max(1, self.preview_lines_per_page // 2)
+
+                                if   kl == 'page up':
+                                    self.preview_offset = max(0, self.preview_offset - self.preview_lines_per_page)
+                                elif kl == 'page down':
+                                    self.preview_offset = min(max_off, self.preview_offset + self.preview_lines_per_page)
+                                elif kl == 'home':
+                                    self.preview_offset = 0
+                                elif kl == 'end':
+                                    self.preview_offset = max_off
+
+                                self._update_preview()
+                                try: self.main_loop.draw_screen()
+                                except Exception: pass
+                                handled = True
+                            except Exception:
+                                handled = False
+
+                        if handled:
+                            continue  # 소비
+
+                    out.append(k)
+                return out
+        except Exception:
+            return keys
+        return keys
+
+    def handle_input(self, key):
+        if not isinstance(key, str):
+            return
+
+        try:
+            pos = self.listbox.focus_position
+            item = self.display_items[pos]
+        except IndexError:
+            # 프레임으로 전달
+            self.frame.keypress(self.main_loop.screen_size, key)
+            return
+
+        if key.lower() == 'q':
+            raise urwid.ExitMainLoop()
+
+        elif key == 'enter':
+            if item['type'] == 'section':
+                # 섹션 확장/축소
+                if item['id'] in self.expanded_items:
+                    self.expanded_items.remove(item['id'])
+                else:
+                    self.expanded_items.add(item['id'])
+            elif item['type'] == 'file':
+                item_id = item['id']
+                self.previewing_item_id = None if self.previewing_item_id == item_id else item_id
+                self.preview_offset = 0
+            self._render_all()
+
+        elif key == ' ':
+            if item['type'] == 'file':
+                self.handle_selection(item)
+                self._render_all(keep_focus=True)
+
+        elif key.lower() == 'd':
+            if len(self.selected_for_diff) == 2:
+                self._show_diff_view()
+            else:
+                self.footer.original_widget.set_text(
+                    f"[!] 2개 항목을 선택해야 diff가 가능합니다. (현재 {len(self.selected_for_diff)}개 선택됨)"
+                )
+        else:
+            # 기본 처리는 프레임으로
+            self.frame.keypress(self.main_loop.screen_size, key)
     
     def _show_diff_view(self):
-        if len(self.selected_for_diff) != 2: return
+        if len(self.selected_for_diff) != 2:
+            return
+
         item1, item2 = self.selected_for_diff
-        
-        # 시간 순서로 정렬 (local이나 더 오래된 것이 왼쪽)
+        # old/new 순서 결정(필요 시 로직 조정)
         if item1.get("source") == "local" or item1.get("msg_id", 0) < item2.get("msg_id", 0):
             old_item, new_item = item1, item2
         else:
             old_item, new_item = item2, item1
 
         try:
-            old_content = old_item['path'].read_text('utf-8').splitlines()
-            new_content = new_item['path'].read_text('utf-8').splitlines()
+            old_lines = old_item['path'].read_text(encoding='utf-8', errors='ignore').splitlines()
+            new_lines = new_item['path'].read_text(encoding='utf-8', errors='ignore').splitlines()
         except Exception as e:
             self.footer.original_widget.set_text(f"Error: {e}")
             return
-            
-        # unified diff 생성
+
         diff = list(difflib.unified_diff(
-            old_content, 
-            new_content, 
-            fromfile=f"a/{old_item['path'].name}", 
-            tofile=f"b/{new_item['path'].name}", 
+            old_lines, new_lines,
+            fromfile=f"a/{old_item['path'].name}",
+            tofile=f"b/{new_item['path'].name}",
             lineterm='',
-            n=3  # 컨텍스트 라인 수
+            n=3
         ))
-        
+
         if not diff:
             self.footer.original_widget.set_text("두 파일이 동일합니다.")
             return
-        
-        # diff 라인을 위젯으로 변환 (배경색 없이)
+
+        # diff 라인 위젯 구성(스타일 이름은 PALETTE에 맞게 조정 가능)
         diff_widgets = []
         for line in diff:
             if line.startswith('+++'):
-                # 새 파일 헤더
-                widget = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light green', ''))
+                w = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light green', ''))
             elif line.startswith('---'):
-                # 원본 파일 헤더
-                widget = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light red', ''))
+                w = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light red', ''))
             elif line.startswith('@@'):
-                # 위치 정보
-                widget = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('yellow', ''))
+                w = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('yellow', ''))
             elif line.startswith('+'):
-                # 추가된 라인 (텍스트 색상만)
-                widget = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light green', ''))
+                w = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light green', ''))
             elif line.startswith('-'):
-                # 삭제된 라인 (텍스트 색상만)
-                widget = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light red', ''))
+                w = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light red', ''))
             else:
-                # 컨텍스트 라인
-                widget = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light gray', ''))
-            
-            diff_widgets.append(widget)
+                w = urwid.AttrMap(urwid.Text(line), urwid.AttrSpec('light gray', ''))
+            diff_widgets.append(w)
 
-        # diff 뷰를 위한 ListBox 생성
-        self.diff_scroll_offset = 0
         diff_walker = urwid.SimpleFocusListWalker(diff_widgets)
         diff_listbox = urwid.ListBox(diff_walker)
-        
-        # 스크롤 정보를 표시할 헤더
-        header_text = urwid.Text(f"Diff: {old_item['path'].name} → {new_item['path'].name}")
-        header = urwid.AttrMap(header_text, 'header')
-        
-        # 푸터에 키 도움말
-        footer_text = "PgUp/Dn: 스크롤 | Q: 닫기"
-        diff_footer = urwid.AttrMap(urwid.Text(footer_text), 'header')
-        
+
+        header = urwid.AttrMap(
+            urwid.Text(f"Diff: {old_item['path'].name} → {new_item['path'].name}"),
+            'header'
+        )
+        diff_footer = urwid.AttrMap(urwid.Text("PgUp/Dn: 스크롤 | Home/End: 처음/끝 | Q: 닫기"), 'header')
         diff_frame = urwid.Frame(diff_listbox, header=header, footer=diff_footer)
 
-        # 원본 위젯 저장
-        original_widget = self.main_loop.widget
-        
-        def diff_input_handler(key):
-            if isinstance(key, str):
-                if key.lower() == 'q':
-                    # 원본 뷰로 복귀
-                    self.main_loop.widget = original_widget
-                    self.main_loop.unhandled_input = self.handle_input
-                elif key == 'page up':
-                    # diff 뷰 스크롤 업
-                    try:
-                        current_pos = diff_listbox.focus_position
-                        new_pos = max(0, current_pos - 10)
-                        diff_listbox.focus_position = new_pos
-                    except IndexError:
-                        pass
-                elif key == 'page down':
-                    # diff 뷰 스크롤 다운
-                    try:
-                        current_pos = diff_listbox.focus_position
-                        new_pos = min(len(diff_widgets) - 1, current_pos + 10)
-                        diff_listbox.focus_position = new_pos
-                    except IndexError:
-                        pass
-                else:
-                    # 기본 키 처리
-                    diff_frame.keypress(self.main_loop.screen_size, key)
-        
-        # diff 뷰로 전환
-        self.main_loop.unhandled_input = diff_input_handler
+        # 기존 상태 백업
+        self._old_widget = self.main_loop.widget
+        self._old_unhandled_input = self.main_loop.unhandled_input
+        self._old_input_filter = self.main_loop.input_filter
+
+        # diff 화면 활성화: PageUp/Down은 ListBox 기본 동작에 맡긴다
         self.main_loop.widget = diff_frame
+
+        # unhandled_input: q만 처리, 나머지는 기본 위젯 처리를 그대로 사용
+        def diff_unhandled(key):
+            if isinstance(key, str) and key.lower() == 'q':
+                # 원상복귀
+                self.main_loop.widget = self._old_widget
+                self.main_loop.unhandled_input = self._old_unhandled_input
+                self.main_loop.input_filter = self._old_input_filter
+                try:
+                    self.main_loop.draw_screen()
+                except Exception:
+                    pass
+
+        # 주의: None을 넣으면 TypeError 날 수 있으니 no-op이 아닌 핸들러를 설정
+        self.main_loop.unhandled_input = diff_unhandled
+
 
     def start(self):
         self._render_all(keep_focus=False)
-        self.main_pile.focus_item = self.listbox
-        
+        self.main_pile.focus_position = 0
+
         screen = urwid.raw_display.Screen()
-        self.main_loop = urwid.MainLoop(self.frame, palette=PALETTE, screen=screen, unhandled_input=self.handle_input)
-        
-        try: self.main_loop.run()
-        finally: screen.clear()
+        # 마우스 트래킹 활성화 (가능한 터미널에서 휠 이벤트 수신)
+        try:
+            screen.set_mouse_tracking()
+        except Exception:
+            pass
+
+        self.main_loop = urwid.MainLoop(
+            self.frame,
+            palette=PALETTE,
+            screen=screen,
+            unhandled_input=self.handle_input,
+            input_filter=self._input_filter
+        )
+        try:
+            self.main_loop.run()
+        finally:
+            screen.clear()
 
 def read_plain_file(path: Path) -> str:
     try:
