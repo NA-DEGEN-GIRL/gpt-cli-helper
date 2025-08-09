@@ -10,3 +10,4 @@ requests
 Pillow
 tiktoken
 PyPDF2
+pygments

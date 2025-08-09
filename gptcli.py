@@ -46,6 +46,9 @@ from rich.box import ROUNDED
 import io
 import tiktoken
 from PIL import Image
+from pygments import lex as pyg_lex
+from pygments.lexers import guess_lexer_for_filename, get_lexer_by_name, TextLexer
+from pygments.token import Token
 
 # 우리 앱만의 커스텀 테마 정의
 rich_theme = Theme({
@@ -118,7 +121,7 @@ PDF_EXT = ".pdf"
 
 SENSITIVE_KEYS = ["secret", "private", "key", "api"]
 
-# PALETTE 정의 수정 (line 100 근처)
+PREVIEW_BG = 'black'
 PALETTE = [                               
     ('key', 'yellow', 'black'),
     ('info', 'dark gray', 'black'),
@@ -139,8 +142,22 @@ PALETTE = [
     ('file_normal', 'light gray', 'black'),
     
     # Preview 관련
-    ('preview', 'light gray', 'black'),
-    ('preview_border', 'dark gray', 'black')
+    ('preview', 'light gray', PREVIEW_BG),
+    ('preview_border', 'dark gray', PREVIEW_BG),
+
+    # diff_code
+    ('syn_text', 'light gray', PREVIEW_BG),
+    ('syn_kw', 'light magenta', PREVIEW_BG),
+    ('syn_str', 'light green', PREVIEW_BG),
+    ('syn_num', 'yellow', PREVIEW_BG),
+    ('syn_com', 'dark gray', PREVIEW_BG),
+    ('syn_name', 'white', PREVIEW_BG),
+    ('syn_func', 'light cyan', PREVIEW_BG),
+    ('syn_class', 'light cyan,bold', PREVIEW_BG),
+    ('syn_op', 'light gray', PREVIEW_BG),
+    ('syn_punc', 'light gray', PREVIEW_BG),
+    ('syn_lno', 'dark gray', PREVIEW_BG),
+
 ]
 
 
@@ -168,6 +185,86 @@ client = OpenAI(
     api_key=OPENROUTER_API_KEY,
     default_headers=DEFAULT_HEADERS,
 )
+
+_lexer_cache: Dict[str, Any] = {}
+
+def _get_lexer_for_path(path: Path) -> Any:
+    key = path.suffix.lower()
+    if key in _lexer_cache:
+        return _lexer_cache[key]
+    try:
+        lexer = guess_lexer_for_filename(path.name, "")
+    except Exception:
+        lexer = TextLexer()
+    _lexer_cache[key] = lexer
+    return lexer
+
+def _tok_to_attr(tt) -> str:
+    from pygments.token import Keyword, String, Number, Comment, Name, Operator, Punctuation, Text, Whitespace
+    if tt in Keyword or tt in Keyword.Namespace or tt in Keyword.Declaration:
+        return 'syn_kw'
+    if tt in String:
+        return 'syn_str'
+    if tt in Number:
+        return 'syn_num'
+    if tt in Comment:
+        return 'syn_com'
+    if tt in Name.Function:
+        return 'syn_func'
+    if tt in Name.Class:
+        return 'syn_class'
+    if tt in Name:
+        return 'syn_name'
+    if tt in Operator:
+        return 'syn_op'
+    if tt in Punctuation:
+        return 'syn_punc'
+    if tt in (Text, Whitespace):
+        return 'syn_text'
+    return 'syn_text'
+
+def build_syntax_markup_for_preview(path: Path, start_line: int, end_line: int) -> List:
+    """
+    path의 [start_line, end_line) 구간을 urwid.Text용 markup으로 변환.
+    줄번호 포함.
+    """
+    try:
+        code = path.read_text(encoding='utf-8', errors='ignore')
+    except Exception as e:
+        return [("syn_com", f"[미리보기 오류: {e}]")]
+
+    lines = code.splitlines()
+    total = len(lines)
+    start = max(0, min(start_line, total))
+    end = max(start, min(end_line, total))
+    digits = max(2, len(str(total)))
+
+    try:
+        lexer = _get_lexer_for_path(path)
+    except Exception:
+        lexer = TextLexer()
+
+    markup: List[Any] = []
+    for idx in range(start, end):
+        line = lines[idx]
+        # 줄번호
+        lno = f"{idx+1:>{digits}} │ "
+        markup.append(('syn_lno', lno))
+        # 토큰 하이라이트
+        try:
+            for ttype, value in pyg_lex(line, lexer):
+                if not value:
+                    continue
+                attr = _tok_to_attr(ttype)
+                markup.append((attr, value))
+        except Exception:
+            markup.append(('syn_text', line))
+        #markup.append("\n")
+
+    if markup and isinstance(markup[-1], str) and markup[-1] == "\n":
+        markup.pop()  # 마지막 개행 정리
+
+    return markup
 
 class TokenEstimator:
     def __init__(self, model: str = "gpt-4"):
@@ -1042,7 +1139,7 @@ class CodeDiffer:
         self.selected_for_diff: List[Dict] = []
         self.previewing_item_id: Optional[str] = None
         self.preview_offset = 0
-        self.preview_lines_per_page = 10
+        self.preview_lines_per_page = 50
 
         # 표시/리스트 구성
         self.display_items: List[Dict] = []
@@ -1050,8 +1147,10 @@ class CodeDiffer:
 
         self.list_walker = urwid.SimpleFocusListWalker([])
         self.listbox = urwid.ListBox(self.list_walker)
-        self.preview_text = urwid.Text("")
-        self.preview_box = urwid.LineBox(self.preview_text, title="Preview")
+        self.preview_text = urwid.Text("", wrap="clip")
+        self.preview_body = urwid.AttrMap(self.preview_text, 'preview')  # 내부 배경
+        self.preview_box = urwid.LineBox(self.preview_body, title="Preview")
+        self.preview_widget = urwid.AttrMap(self.preview_box, 'preview_border')  # 테두리/제목 색
 
         self.main_pile = urwid.Pile([self.listbox])
         footer_text = "↑/↓:이동 | Enter:확장/프리뷰 | Space:선택 | D:Diff | Q:종료 | PgUp/Dn:스크롤"
@@ -1189,20 +1288,22 @@ class CodeDiffer:
             total = len(lines)
             start = self.preview_offset
             end = min(start + self.preview_lines_per_page, total)
-            preview = "\n".join(lines[start:end])
-
+            
             info = f" [{start+1}-{end}/{total}]"
             title = f"Preview: {item_data['path'].name}{info}"
             self.preview_box.set_title(title)
-            self.preview_text.set_text(preview)
+
+            # 문법 하이라이트 + 줄번호 포함 마크업 생성
+            markup = build_syntax_markup_for_preview(item_data['path'], start, end)
+            self.preview_text.set_text(markup)
 
             if not is_previewing:
                 # 프리뷰를 목록 하단에 배치(메뉴 가림 방지)
-                self.main_pile.contents.append((self.preview_box, self.main_pile.options('pack')))
+                self.main_pile.contents.append((self.preview_widget, self.main_pile.options('pack')))
         except Exception as e:
             self.preview_text.set_text(f"[Error]: {e}")
             if not is_previewing:
-                self.main_pile.contents.append((self.preview_box, self.main_pile.options('pack')))
+                self.main_pile.contents.append((self.preview_widget, self.main_pile.options('pack')))
 
 
     def _input_filter(self, keys, raw):
@@ -1404,6 +1505,7 @@ class CodeDiffer:
         screen = urwid.raw_display.Screen()
         # 마우스 트래킹 활성화 (가능한 터미널에서 휠 이벤트 수신)
         try:
+            screen.set_terminal_properties(colors=256)
             screen.set_mouse_tracking()
         except Exception:
             pass
@@ -2555,6 +2657,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
             elif cmd == "/diff_code":
                 differ = CodeDiffer(attached, current_session_name, messages)
                 differ.start()
+                snap_scroll_to_bottom()
                 continue
             elif cmd == "/pretty_print":
                 pretty_print_enabled = not pretty_print_enabled
