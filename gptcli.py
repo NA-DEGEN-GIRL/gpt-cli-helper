@@ -88,6 +88,62 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 MD_OUTPUT_DIR.mkdir(exist_ok=True)
 CODE_OUTPUT_DIR.mkdir(exist_ok=True)
 
+# 파일 처리
+PLAIN_EXTS = {
+    ".txt",
+    ".md",
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".java",
+    ".c",
+    ".cpp",
+    ".json",
+    ".yml",
+    ".yaml",
+    ".html",
+    ".css",
+    ".scss",
+    ".rs",
+    ".go",
+    ".php",
+    ".rb",
+    ".sh",
+    ".sql",
+}
+IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+PDF_EXT = ".pdf"
+
+SENSITIVE_KEYS = ["secret", "private", "key", "api"]
+
+# PALETTE 정의 수정 (line 100 근처)
+PALETTE = [                               
+    ('key', 'yellow', 'black'),
+    ('info', 'dark gray', 'black'),
+    ('myfocus', 'black', 'light gray'),
+    ('info_bg', '', 'dark gray'), 
+    ('info_fg', 'dark gray', ''),
+    # Diff 뷰를 위한 스타일 추가
+    ('diff_add', 'black', 'dark green'),
+    ('diff_remove', 'black', 'dark red'),
+    ('header', 'white', 'black'),  # ⚠️ 수정: 'dark blue' -> 'black'으로 변경
+    # Response 관련 - 배경색 제거 또는 black으로 변경
+    ('response_header', 'white,bold', 'black'),
+    ('response_selected', 'black', 'light gray'),
+    ('response_normal', 'light gray', 'black'),
+    
+    # 파일 관련
+    ('file_selected', 'black', 'light gray'),
+    ('file_normal', 'light gray', 'black'),
+    
+    # Preview 관련
+    ('preview', 'light gray', 'black'),
+    ('preview_border', 'dark gray', 'black')
+]
+
+
 #TRIMMED_HISTORY = 20
 DEFAULT_CONTEXT_LENGTH = 200000
 CONTEXT_TRIM_RATIO = 0.7
@@ -838,8 +894,8 @@ class ModelSearcher:
         screen = urwid.raw_display.Screen()
         main_loop = urwid.MainLoop(frame, palette=PALETTE, screen=screen, unhandled_input=exit_handler)
         
-        try: main_loop.run()
-        finally: screen.clear()
+        main_loop.run()
+        #finally: screen.clear()
 
         if save_triggered:
             self._save_models()
@@ -960,61 +1016,19 @@ def is_ignored(p: Path, spec: Optional[PathSpec]) -> bool:
     # 3. 수정된 경로 문자열로 매칭을 수행합니다.
     return spec.match_file(relative_path_str)
 
-
-# 파일 처리
-PLAIN_EXTS = {
-    ".txt",
-    ".md",
-    ".py",
-    ".js",
-    ".ts",
-    ".tsx",
-    ".jsx",
-    ".java",
-    ".c",
-    ".cpp",
-    ".json",
-    ".yml",
-    ".yaml",
-    ".html",
-    ".css",
-    ".scss",
-    ".rs",
-    ".go",
-    ".php",
-    ".rb",
-    ".sh",
-    ".sql",
-}
-IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
-PDF_EXT = ".pdf"
-
-SENSITIVE_KEYS = ["secret", "private", "key", "api"]
-
-# PALETTE 정의 수정 (line 100 근처)
-PALETTE = [                               
-    ('key', 'yellow', 'black'),
-    ('info', 'dark gray', 'black'),
-    ('myfocus', 'black', 'light gray'),
-    ('info_bg', '', 'dark gray'), 
-    ('info_fg', 'dark gray', ''),
-    # Diff 뷰를 위한 스타일 추가
-    ('diff_add', 'black', 'dark green'),
-    ('diff_remove', 'black', 'dark red'),
-    ('header', 'white', 'black'),  # ⚠️ 수정: 'dark blue' -> 'black'으로 변경
-    # Response 관련 - 배경색 제거 또는 black으로 변경
-    ('response_header', 'white,bold', 'black'),
-    ('response_selected', 'black', 'light gray'),
-    ('response_normal', 'light gray', 'black'),
-    
-    # 파일 관련
-    ('file_selected', 'black', 'light gray'),
-    ('file_normal', 'light gray', 'black'),
-    
-    # Preview 관련
-    ('preview', 'light gray', 'black'),
-    ('preview_border', 'dark gray', 'black')
-]
+def snap_scroll_to_bottom() -> None:
+    """
+    TUI(urwid)에서 복귀 후, 터미널 뷰포트가 버퍼 상단에 고정되는 현상을 방지하기 위해
+    아주 작은 출력(개행)을 한 번 찍어 즉시 맨 아래로 스냅시킨다.
+    """
+    try:
+        # 작은 개행 한 번이면 대부분의 터미널에서 즉시 bottom으로 이동한다.
+        # (스크롤백이 위에 고정된 상태에서 다음 출력이 '강제 하단 정렬'을 유도)
+        sys.stdout.write("\n") # 소용없음
+        sys.stdout.flush() # 소용없음
+        console.print() # 소용없음
+    except Exception:
+        pass
 
 class CodeDiffer:
     def __init__(self, attached_files: List[str], session_name: str, messages: List[Dict]):
@@ -1401,10 +1415,10 @@ class CodeDiffer:
             unhandled_input=self.handle_input,
             input_filter=self._input_filter
         )
-        try:
-            self.main_loop.run()
-        finally:
-            screen.clear()
+        #try:
+        self.main_loop.run()
+        #finally:
+        #    screen.clear()
 
 def read_plain_file(path: Path) -> str:
     try:
@@ -2580,6 +2594,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                     console.print(f"[green]모델 변경: {old_model} → {model} (컨텍스트: {model_context})[/green]")
                 else:
                     console.print(f"[green]모델 변경없음: {model}[/green]")
+                snap_scroll_to_bottom()
                 continue
 
             elif cmd == "/search_models":
@@ -2589,6 +2604,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 
                 searcher = ModelSearcher()
                 searcher.start(args) # args가 키워드 리스트가 됨
+                snap_scroll_to_bottom()
                 continue # 명령어 처리 후 다음 프롬프트로
             
             elif cmd == "/all_files":
@@ -2598,6 +2614,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 if attached:
                     # 🎯 첨부 파일 토큰 분석 표시
                     display_attachment_tokens(attached, compact_mode)
+                snap_scroll_to_bottom()
             elif cmd == "/files":
                 current_attached_paths = set(Path(p) for p in attached)
                 newly_added_paths = set()
@@ -2852,6 +2869,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                     return result[0]
                 
                 selected_backup = select_backup()
+                snap_scroll_to_bottom()
                 
                 if not selected_backup:
                     console.print("[dim]복원이 취소되었습니다.[/dim]")
