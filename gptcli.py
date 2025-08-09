@@ -1139,7 +1139,9 @@ class CodeDiffer:
         self.selected_for_diff: List[Dict] = []
         self.previewing_item_id: Optional[str] = None
         self.preview_offset = 0
-        self.preview_lines_per_page = 50
+        self.preview_lines_per_page = 30
+
+        self._visible_preview_lines: Optional[int] = None
 
         # 표시/리스트 구성
         self.display_items: List[Dict] = []
@@ -1147,11 +1149,14 @@ class CodeDiffer:
 
         self.list_walker = urwid.SimpleFocusListWalker([])
         self.listbox = urwid.ListBox(self.list_walker)
-        self.preview_text = urwid.Text("", wrap="clip")
-        self.preview_body = urwid.AttrMap(self.preview_text, 'preview')  # 내부 배경
-        self.preview_box = urwid.LineBox(self.preview_body, title="Preview")
-        self.preview_widget = urwid.AttrMap(self.preview_box, 'preview_border')  # 테두리/제목 색
+        self.preview_text = urwid.Text("", wrap="clip")                         # flow
+        self.preview_body = urwid.AttrMap(self.preview_text, 'preview')         # 배경 스타일
+        self.preview_filler = urwid.Filler(self.preview_body, valign='top')     # flow → box
+        self.preview_adapted = urwid.BoxAdapter(self.preview_filler, 1)         # 고정 높이(초기 1줄)
+        self.preview_box = urwid.LineBox(self.preview_adapted, title="Preview") # 테두리(+2줄)
+        self.preview_widget = urwid.AttrMap(self.preview_box, 'preview_border') # 외곽 스타일
 
+        self._visible_preview_lines: Optional[int] = None  # 동적 가시 줄수 캐시
         self.main_pile = urwid.Pile([self.listbox])
         footer_text = "↑/↓:이동 | Enter:확장/프리뷰 | Space:선택 | D:Diff | Q:종료 | PgUp/Dn:스크롤"
         self.footer = urwid.AttrMap(urwid.Text(footer_text), 'header')
@@ -1162,6 +1167,38 @@ class CodeDiffer:
         self._old_input_filter = None
         self._old_unhandled_input = None
         self._old_widget = None
+
+    def _calc_preview_visible_lines(self) -> int:
+        """
+        터미널 rows에 맞춰 프리뷰 본문(코드) 가시 줄 수를 계산.
+        LineBox 테두리 2줄을 제외하고 반환.
+        """
+        try:
+            cols, rows = self.main_loop.screen.get_cols_rows()
+        except Exception:
+            rows = 24  # 폴백
+
+        min_list_rows = 6   # 목록이 최소 확보할 줄 수
+        footer_rows = 1     # Frame footer 가정
+        safety = 1
+
+        # 프리뷰에 할당 가능한 총 높이(테두리 포함)
+        available_total = max(0, rows - (min_list_rows + footer_rows + safety))
+        # 본문 라인 수 = 총 높이 - 2(위/아래 테두리)
+        visible_lines = max(1, available_total - 2)
+        # 유저 설정보다 크지 않게 제한
+        return min(self.preview_lines_per_page, visible_lines)
+
+    def _ensure_preview_in_pile(self, adapted_widget: urwid.Widget) -> None:
+        """
+        Pile 맨 아래에 프리뷰 박스를 넣되, 이미 있으면 교체한다.
+        """
+        if len(self.main_pile.contents) == 1:
+            # 아직 프리뷰가 없으면 추가
+            self.main_pile.contents.append((adapted_widget, self.main_pile.options('pack')))
+        else:
+            # 이미 프리뷰가 있으면 위젯/옵션을 교체
+            self.main_pile.contents[-1] = (adapted_widget, self.main_pile.options('pack'))
 
     # ─────────────────────────────────────────────
     # (추가) 프리뷰 스크롤 헬퍼
@@ -1284,51 +1321,66 @@ class CodeDiffer:
             return
 
         try:
-            lines = item_data['path'].read_text(encoding='utf-8', errors='ignore').splitlines()
-            total = len(lines)
-            start = self.preview_offset
-            end = min(start + self.preview_lines_per_page, total)
-            
-            info = f" [{start+1}-{end}/{total}]"
-            title = f"Preview: {item_data['path'].name}{info}"
-            self.preview_box.set_title(title)
+            all_lines = item_data['path'].read_text(encoding='utf-8', errors='ignore').splitlines()
+            total = len(all_lines)
 
-            # 문법 하이라이트 + 줄번호 포함 마크업 생성
+            # 1) 가시 줄 수 산정 및 캐시
+            visible_lines = self._calc_preview_visible_lines()
+            self._visible_preview_lines = visible_lines
+
+            # 2) 오프셋 보정
+            max_offset = max(0, total - visible_lines)
+            if self.preview_offset > max_offset:
+                self.preview_offset = max_offset
+
+            start = self.preview_offset
+            end = min(start + visible_lines, total)
+
+            # 3) 제목 갱신
+            info = f" [{start+1}-{end}/{total}]"
+            self.preview_box.set_title(f"Preview: {item_data['path'].name}{info}")
+
+            # 4) 문법 하이라이트 마크업 적용(줄바꿈 처리 방식은 현재 유지)
             markup = build_syntax_markup_for_preview(item_data['path'], start, end)
             self.preview_text.set_text(markup)
 
+            # 5) 핵심: Filler를 BoxAdapter로 N줄 고정(본문 줄 수만)
+            # LineBox가 외곽에 +2줄을 더함
+            self.preview_adapted.height = visible_lines
+
+            # 6) Pile에 미부착 시 추가, 부착 시 교체
             if not is_previewing:
-                # 프리뷰를 목록 하단에 배치(메뉴 가림 방지)
                 self.main_pile.contents.append((self.preview_widget, self.main_pile.options('pack')))
+            else:
+                self.main_pile.contents[-1] = (self.preview_widget, self.main_pile.options('pack'))
+
         except Exception as e:
             self.preview_text.set_text(f"[Error]: {e}")
+            # 오류 시에도 높이 유지
+            self.preview_adapted.height = max(1, self._visible_preview_lines or 1)
             if not is_previewing:
                 self.main_pile.contents.append((self.preview_widget, self.main_pile.options('pack')))
-
-
+            else:
+                self.main_pile.contents[-1] = (self.preview_widget, self.main_pile.options('pack'))
     def _input_filter(self, keys, raw):
-        """
-        메인(리스트+프리뷰) 화면에서만 프리뷰 스크롤 키를 가로채 소비하여
-        ListBox가 포커스를 움직이지 못하게 한다.
-        """
         try:
             if self.main_loop and self.main_loop.widget is self.frame:
                 out = []
                 for k in keys:
-                    # 프리뷰가 열려있을 때 마우스 휠 처리 (반 페이지)
+                    # 마우스 휠
                     if isinstance(k, tuple) and len(k) >= 2 and self.previewing_item_id:
                         ev, btn = k[0], k[1]
                         if ev == 'mouse press' and btn in (4, 5):
                             try:
                                 it = next(x for x in self.display_items if x.get('id') == self.previewing_item_id)
-                                lines = it['path'].read_text(encoding='utf-8', errors='ignore').splitlines()
-                                total = len(lines)
-                                max_off = max(0, total - self.preview_lines_per_page)
-                                half = max(1, self.preview_lines_per_page // 2)
+                                total = len(it['path'].read_text(encoding='utf-8', errors='ignore').splitlines())
+                                lines_per_page = self._visible_preview_lines or self.preview_lines_per_page
+                                max_off = max(0, total - lines_per_page)
+                                step = max(1, lines_per_page // 2)
                                 if btn == 4:
-                                    self.preview_offset = max(0, self.preview_offset - half)
+                                    self.preview_offset = max(0, self.preview_offset - step)
                                 else:
-                                    self.preview_offset = min(max_off, self.preview_offset + half)
+                                    self.preview_offset = min(max_off, self.preview_offset + step)
                                 self._update_preview()
                                 try: self.main_loop.draw_screen()
                                 except Exception: pass
@@ -1336,22 +1388,20 @@ class CodeDiffer:
                                 pass
                             continue  # 소비
 
-                    # 키(문자열) 처리
                     if isinstance(k, str) and self.previewing_item_id:
                         kl = k.lower()
                         handled = False
                         if kl in ('page up', 'page down', 'home', 'end'):
                             try:
                                 it = next(x for x in self.display_items if x.get('id') == self.previewing_item_id)
-                                lines = it['path'].read_text(encoding='utf-8', errors='ignore').splitlines()
-                                total = len(lines)
-                                max_off = max(0, total - self.preview_lines_per_page)
-                                half = max(1, self.preview_lines_per_page // 2)
+                                total = len(it['path'].read_text(encoding='utf-8', errors='ignore').splitlines())
+                                lines_per_page = self._visible_preview_lines or self.preview_lines_per_page
+                                max_off = max(0, total - lines_per_page)
 
                                 if   kl == 'page up':
-                                    self.preview_offset = max(0, self.preview_offset - self.preview_lines_per_page)
+                                    self.preview_offset = max(0, self.preview_offset - lines_per_page)
                                 elif kl == 'page down':
-                                    self.preview_offset = min(max_off, self.preview_offset + self.preview_lines_per_page)
+                                    self.preview_offset = min(max_off, self.preview_offset + lines_per_page)
                                 elif kl == 'home':
                                     self.preview_offset = 0
                                 elif kl == 'end':
@@ -1372,7 +1422,7 @@ class CodeDiffer:
         except Exception:
             return keys
         return keys
-
+    
     def handle_input(self, key):
         if not isinstance(key, str):
             return
