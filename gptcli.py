@@ -242,6 +242,299 @@ client = OpenAI(
 # ─────────────────────────────
 # diff view 전용 문법 하이라이트 유틸
 # ─────────────────────────────
+DIFF_ADD_BG = '#005C40'   # '+' 라인 배경
+DIFF_DEL_BG = '#40002E'   # '-' 라인 배경
+DIFF_CTX_BG = 'black'     # 컨텍스트 라인 배경
+
+# 일부 터미널/드라이버에서 hex가 정밀히 매핑되지 않을 수 있으므로 fallback도 준비
+DIFF_ADD_BG_FALLBACK = 'dark green'
+DIFF_DEL_BG_FALLBACK = 'dark red'
+DIFF_CTX_BG_FALLBACK = 'black'
+
+SIGN_FG = {'add': 'black', 'del': 'black', 'ctx': 'dark gray'}
+LNO_OLD_FG = 'light red'
+LNO_NEW_FG = 'light green'
+SEP_FG = 'dark gray'
+
+def _tok_base_for_diff(tt) -> str:
+    """Pygments 토큰을 범주로 단순화"""
+    from pygments.token import Keyword, String, Number, Comment, Name, Operator, Punctuation, Text, Whitespace
+    if tt in Keyword or tt in Keyword.Namespace or tt in Keyword.Declaration: return 'kw'
+    if tt in String:       return 'str'
+    if tt in Number:       return 'num'
+    if tt in Comment:      return 'com'
+    if tt in Name.Function:return 'func'
+    if tt in Name.Class:   return 'cls'
+    if tt in Name:         return 'name'
+    if tt in Operator:     return 'op'
+    if tt in Punctuation:  return 'punc'
+    if tt in (Text, Whitespace): return 'text'
+    return 'text'
+
+COLOR_ALIASES = {
+    # 사람이 쓰기 쉬운 별칭 → 실제 색(가능하면 HEX)
+    'light yellow': '#fffacd',      # Lemon Chiffon
+    'very light yellow': '#fffeed', # Very light yellow
+    'pastel yellow': '#ffee8c',     # Pastel yellow
+    # 관용 표기(하이픈/언더스코어)도 수용
+    'light-yellow': '#fffacd',
+    'very-light-yellow': '#fffeed',
+    'pastel-yellow': '#ffee8c',
+}
+
+# HEX가 안 되는 환경(256색)에서 근사치로 강등
+TRUECOLOR_FALLBACKS = {
+    '#fffacd': 'yellow',  # lemon chiffon → yellow 근사
+    '#fffeed': 'white',   # 매우 밝은 옐로우 → white 근사
+    '#ffee8c': 'yellow',  # 파스텔 옐로우 → yellow 근사
+    '#ffd3ac': 'yellow',  # peach 톤
+    '#ffdbbb': 'yellow',  # light orange 톤
+}
+
+# 각 라인 종류에 대한 테마 선택
+_FG_THEMES = {
+    # 기존
+    'solarized-ish': {
+        'kw':'light magenta','str':'light green','num':'yellow','com':'dark gray',
+        'name':'white','func':'light cyan','cls':'light cyan,bold',
+        'op':'light gray','punc':'light gray','text':'light gray',
+    },
+
+    # 추가: Monokai 느낌
+    'monokai-ish': {
+        'kw':'light magenta','str':'yellow','num':'light cyan','com':'dark gray',
+        'name':'white','func':'light green','cls':'light green,bold',
+        'op':'light gray','punc':'light gray','text':'light gray',
+    },
+
+    # 추가: Dracula 느낌
+    'dracula-ish': {
+        'kw':'light magenta','str':'light yellow','num':'light cyan','com':'dark gray',
+        'name':'white','func':'light green','cls':'light green,bold',
+        'op':'light gray','punc':'light gray','text':'light gray',
+    },
+
+    # 추가: Nord 느낌
+    'nord-ish': {
+        'kw':'light cyan','str':'light green','num':'light blue','com':'dark gray',
+        'name':'white','func':'light cyan','cls':'light cyan,bold',
+        'op':'light gray','punc':'light gray','text':'light gray',
+    },
+
+    # 추가: Gruvbox Dark 느낌
+    'gruvbox-dark-ish': {
+        'kw':'yellow','str':'light green','num':'light cyan','com':'brown',
+        'name':'white','func':'light cyan','cls':'light cyan,bold',
+        'op':'light gray','punc':'light gray','text':'light gray',
+    },
+
+    # 추가: One Dark 느낌
+    'one-dark-ish': {
+        'kw':'light blue','str':'light green','num':'light magenta','com':'dark gray',
+        'name':'white','func':'light cyan','cls':'light cyan,bold',
+        'op':'light gray','punc':'light gray','text':'light gray',
+    },
+
+    # 추가: Tokyo Night 느낌
+    'tokyo-night-ish': {
+        'kw':'light blue','str':'light yellow','num':'light cyan','com':'dark gray',
+        'name':'white','func':'light cyan','cls':'light cyan,bold',
+        'op':'light gray','punc':'light gray','text':'light gray',
+    },
+
+    # 추가: 파스텔 톤
+    'pastel': {
+        'kw':'light magenta','str':'light yellow','num':'light cyan','com':'light gray',
+        'name':'white','func':'light cyan','cls':'light cyan,bold',
+        'op':'light gray','punc':'light gray','text':'white',
+    },
+
+    # 추가: Matrix 그린 콘솔
+    'matrix-green': {
+        'kw':'light green','str':'light green','num':'light green','com':'dark gray',
+        'name':'light green','func':'light green,bold','cls':'light green,bold',
+        'op':'light green','punc':'light green','text':'light green',
+    },
+
+    # 추가: 밝은 종이 느낌(라이트 배경에 적합한 어두운 잉크)
+    'paper-light': {
+        'kw':'dark blue','str':'dark green','num':'dark magenta','com':'dark gray',
+        'name':'black','func':'dark cyan','cls':'dark cyan,bold',
+        'op':'black','punc':'black','text':'black',
+    },
+
+    # 추가: 고대비 비비드
+    'vivid-contrast': {
+        'kw':'light magenta,bold','str':'yellow,bold','num':'light cyan,bold','com':'light gray',
+        'name':'white,bold','func':'light green,bold','cls':'light green,bold',
+        'op':'white','punc':'white','text':'white',
+    },
+}
+
+# 각 라인 종류에 대한 테마 선택(초기값)
+_FG_MAP = {
+    'add': None,
+    'del': None,
+    'ctx': None,
+}
+
+def set_diff_fg_theme(name_for_add: str, name_for_del: str, name_for_ctx: str):
+    """
+    kind별 전경색 테마를 동적으로 변경.
+    사용 예: set_diff_fg_theme('gruvbox-dark-ish','dracula-ish','nord-ish')
+    """
+    for kind, name in (('add', name_for_add), ('del', name_for_del), ('ctx', name_for_ctx)):
+        if name not in _FG_THEMES:
+            raise KeyError(f"Unknown theme '{name}'. Available: {', '.join(sorted(_FG_THEMES.keys()))}")
+        _FG_MAP[kind] = _FG_THEMES[name]
+
+# 필요 시, 한 가지 테마를 세 종류 모두에 적용하는 헬퍼
+def set_diff_fg_theme_all(name: str):
+    set_diff_fg_theme(name, name, name)
+
+
+
+def _split_color_attrs(spec: str) -> tuple[str, str]:
+    """
+    'light cyan,bold' → ('light cyan', 'bold')
+    '#fffacd' → ('#fffacd', '')
+    'default' → ('default', '')
+    """
+    if spec is None:
+        return None, ''
+    s = str(spec).strip()
+    if not s:
+        return '', ''
+    parts = [p.strip() for p in s.split(',') if p.strip()]
+    color = parts[0] if parts else s
+    attrs = ','.join(parts[1:]) if len(parts) > 1 else ''
+    return color, attrs
+
+def _normalize_color_spec(spec: str) -> str:
+    """
+    - COLOR_ALIASES 적용
+    - 대소문자 정규화
+    """
+    if spec is None or spec == '':
+        return spec
+    color, attrs = _split_color_attrs(spec)
+    if not color:
+        return spec
+    key = color.lower()
+    color = COLOR_ALIASES.get(key, color)  # 별칭이면 HEX로 치환
+    out = color
+    if attrs:
+        out += ',' + attrs
+    return out
+
+def _demote_truecolor_to_256(spec: str, default: str = 'white') -> str:
+    """
+    HEX → 256색 근사로 강등
+    """
+    if spec is None or spec == '':
+        return spec or default
+    color, attrs = _split_color_attrs(spec)
+    if color and color.startswith('#'):
+        color = TRUECOLOR_FALLBACKS.get(color.lower(), default)
+    out = color or default
+    if attrs:
+        out += ',' + attrs
+    return out
+
+def _mk_attr(fg: str, bg: str, fb_bg: str) -> urwid.AttrSpec:
+    """
+    - 에일리어스/HEX 지원
+    - 실패 시 256색 근사 및 배경 폴백 사용
+    """
+    fg_norm = _normalize_color_spec(fg) if fg else fg
+    bg_norm = _normalize_color_spec(bg) if bg else bg
+    try:
+        return urwid.AttrSpec(fg_norm, bg_norm)
+    except Exception:
+        # 전/배경 각각 256색 근사로 강등
+        fg_f = _demote_truecolor_to_256(fg_norm, default='white') if fg_norm else fg_norm
+        # 배경은 지정한 fb_bg도 고려
+        bg_f = _demote_truecolor_to_256(bg_norm, default=fb_bg) if bg_norm else fb_bg
+        # 그래도 실패하면 최후의 안전값
+        try:
+            return urwid.AttrSpec(fg_f, bg_f)
+        except Exception:
+            return urwid.AttrSpec('white', fb_bg)
+
+set_diff_fg_theme('monokai-ish','monokai-ish','pastel')
+
+def _bg_for_kind(kind: str) -> tuple[str, str]:
+    if kind == 'add': return (DIFF_ADD_BG, DIFF_ADD_BG_FALLBACK)
+    if kind == 'del': return (DIFF_DEL_BG, DIFF_DEL_BG_FALLBACK)
+    return (DIFF_CTX_BG, DIFF_CTX_BG_FALLBACK)
+
+def build_diff_line_text(
+    kind: str,                # 'add' | 'del' | 'ctx'
+    code_line: str,           # 개행 없는 한 줄
+    old_no: Optional[int],
+    new_no: Optional[int],
+    digits_old: int,
+    digits_new: int,
+    lexer=None,
+) -> urwid.Widget:
+    """
+    한 줄 Diff를 '라인 배경 고정' 방식으로 구성.
+    - 구터(기호/라인번호/구분자)부터 코드 토큰까지 동일 배경 적용
+    - 라인 종류(kind)에 따라 토큰 전경색 매핑
+    - 화면 너비 끝까지 동일 배경이 보이도록 오른쪽 filler(공백 채움) 포함
+    """
+    bg, fb_bg = _bg_for_kind(kind)
+    fgmap = _FG_MAP[kind]
+
+    sign_char = '+' if kind == 'add' else '-' if kind == 'del' else ' '
+    old_s = f"{old_no}" if old_no is not None else ""
+    new_s = f"{new_no}" if new_no is not None else ""
+
+    parts: List[Tuple[urwid.AttrSpec, str]] = []
+    parts.append((_mk_attr(SIGN_FG[kind], bg, fb_bg), f"{sign_char} "))
+    parts.append((_mk_attr(LNO_OLD_FG, bg, fb_bg), f"{old_s:>{digits_old}} "))
+    parts.append((_mk_attr(LNO_NEW_FG, bg, fb_bg), f"{new_s:>{digits_new}} "))
+    parts.append((_mk_attr(SEP_FG,      bg, fb_bg), "│ "))
+
+    # 코드 토큰(탭 고정폭, 개행 제거)
+    safe = code_line.expandtabs(4).replace('\n','').replace('\r','')
+
+    # lexer 준비(없으면 파일 확장자 기준)
+    if lexer is None:
+        try:
+            # new 파일 기준으로 추정하되, 호출부에서 전달하는 것을 권장
+            lexer = TextLexer()
+        except Exception:
+            lexer = TextLexer()
+
+    for ttype, value in pyg_lex(safe, lexer):
+        if not value:
+            continue
+        v = value.replace('\n','').replace('\r','')
+        if not v:
+            continue
+        base = _tok_base_for_diff(ttype)
+        parts.append((_mk_attr(fgmap.get(base, 'white'), bg, fb_bg), v))
+
+    # 핵심: 내용 텍스트 + 오른쪽 빈칸 채우기(filler)를 조합해 "화면 끝까지" 같은 배경 유지
+    content = urwid.Text(parts, wrap='clip')  # 실제 표시 내용
+    # filler에 동일 배경을 적용 (전경색은 의미 없으므로 'default')
+    fill_attr = _mk_attr('default', bg, fb_bg)
+    right_fill = urwid.AttrMap(urwid.SolidFill(' '), fill_attr)
+
+    # 첫 열은 내용 폭만(pack), 두 번째 열은 남은 폭 전체(weight=1)
+    line = urwid.Columns(
+        [
+            ('pack', content),
+            ('weight', 1, right_fill),
+        ],
+        dividechars=0,
+        box_columns=None,
+        focus_column=None
+    )
+    return line
+
+
 def _tok_to_diff_attr(tt) -> str:
     from pygments.token import Keyword, String, Number, Comment, Name, Operator, Punctuation, Text, Whitespace
     if tt in Keyword or tt in Keyword.Namespace or tt in Keyword.Declaration:
@@ -1741,50 +2034,50 @@ class CodeDiffer:
                 i += 1
                 continue
 
-            
-            # 행 렌더러: 두 개 라인 번호 + 기호 + preview 토큰
-            def emit(sign: str, old_no: Optional[int], new_no: Optional[int], content: str):
-                markup = build_diff_line_markup_preview_style(
-                    path=new_item['path'],
-                    line_text=content,
-                    old_no=old_no,
-                    new_no=new_no,
-                    digits_old=digits_old,
-                    digits_new=digits_new,
-                    sign=sign,
-                    lexer=lexer
+            # 라인 방출 헬퍼: 라인 종류(kind)에 따라 '한 줄 전체 배경'으로 렌더
+            def emit_kind(kind: str, old_no: Optional[int], new_no: Optional[int], content: str):
+                widgets.append(
+                    build_diff_line_text(
+                        kind=kind,
+                        code_line=content,
+                        old_no=old_no,
+                        new_no=new_no,
+                        digits_old=digits_old,
+                        digits_new=digits_new,
+                        lexer=lexer,
+                    )
                 )
-                widgets.append(urwid.Text(markup, wrap='clip'))
+
 
             # '-' 다음이 '+' 페어: 두 줄 연속
             if line.startswith('-') and i + 1 < len(diff) and diff[i+1].startswith('+'):
                 old_line = line[1:]
                 new_line = diff[i+1][1:]
-                emit('-', old_ln, None, old_line)
-                emit('+', None, new_ln, new_line)
+                emit_kind('del', old_ln, None, old_line)
+                emit_kind('add', None, new_ln, new_line)
                 if old_ln is not None: old_ln += 1
                 if new_ln is not None: new_ln += 1
                 i += 2
                 continue
 
-            # 단일 라인들
+            # 단일 라인
             if line.startswith('-'):
-                emit('-', old_ln, None, line[1:])
+                emit_kind('del', old_ln, None, line[1:])
                 if old_ln is not None: old_ln += 1
             elif line.startswith('+'):
-                emit('+', None, new_ln, line[1:])
+                emit_kind('add', None, new_ln, line[1:])
                 if new_ln is not None: new_ln += 1
             elif line.startswith(('---','+++')):
                 widgets.append(urwid.Text(('diff_meta', line), wrap='clip'))
             else:
                 content = line[1:] if line.startswith(' ') else line
-                emit(' ', old_ln, new_ln, content)
+                emit_kind('ctx', old_ln, new_ln, content)
                 if old_ln is not None: old_ln += 1
                 if new_ln is not None: new_ln += 1
 
             i += 1
 
-        diff_walker = urwid.SimpleFocusListWalker([urwid.AttrMap(w, None) for w in widgets])
+        diff_walker = urwid.SimpleFocusListWalker(widgets)
         diff_listbox = urwid.ListBox(diff_walker)
 
         header = urwid.AttrMap(
