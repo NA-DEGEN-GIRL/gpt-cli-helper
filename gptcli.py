@@ -142,7 +142,7 @@ PALETTE = [
     ('file_normal', 'light gray', 'black'),
     
     # Preview 관련
-    ('preview', 'light gray', PREVIEW_BG),
+    ('preview', 'default', PREVIEW_BG),
     ('preview_border', 'dark gray', PREVIEW_BG),
 
     # diff_code
@@ -157,6 +157,7 @@ PALETTE = [
     ('syn_op', 'light gray', PREVIEW_BG),
     ('syn_punc', 'light gray', PREVIEW_BG),
     ('syn_lno', 'dark gray', PREVIEW_BG),
+
 ]
 
 PALETTE.extend([
@@ -256,19 +257,56 @@ LNO_OLD_FG = 'light red'
 LNO_NEW_FG = 'light green'
 SEP_FG = 'dark gray'
 
+
 def _tok_base_for_diff(tt) -> str:
-    """Pygments 토큰을 범주로 단순화"""
-    from pygments.token import Keyword, String, Number, Comment, Name, Operator, Punctuation, Text, Whitespace
-    if tt in Keyword or tt in Keyword.Namespace or tt in Keyword.Declaration: return 'kw'
-    if tt in String:       return 'str'
-    if tt in Number:       return 'num'
-    if tt in Comment:      return 'com'
-    if tt in Name.Function:return 'func'
-    if tt in Name.Class:   return 'cls'
-    if tt in Name:         return 'name'
-    if tt in Operator:     return 'op'
-    if tt in Punctuation:  return 'punc'
-    if tt in (Text, Whitespace): return 'text'
+    """Pygments 토큰을 범주로 단순화 (docstring을 주석으로 처리)"""
+    from pygments.token import (
+        Keyword, String, Number, Comment, Name, Operator, 
+        Punctuation, Text, Whitespace, Literal
+    )
+    
+    # Docstring을 주석으로 처리 (Pygments가 이미 정확히 분류함)
+    if tt in String.Doc or tt == String.Doc:
+        return 'com'
+    
+    # 멀티라인 문자열도 주석으로 처리하고 싶다면
+    if tt == String.Double.Triple or tt == String.Single.Triple:
+        return 'com'
+    
+    # 일반 주석
+    if tt in Comment:
+        return 'com'
+    
+    # 나머지 문자열은 str로
+    if tt in String:
+        return 'str'
+    
+    # 키워드
+    if tt in Keyword or tt in Keyword.Namespace or tt in Keyword.Declaration:
+        return 'kw'
+    
+    # 숫자
+    if tt in Number:
+        return 'num'
+    
+    # 이름/식별자
+    if tt in Name.Function:
+        return 'func'
+    if tt in Name.Class:
+        return 'cls'
+    if tt in Name:
+        return 'name'
+    
+    # 연산자/구두점
+    if tt in Operator:
+        return 'op'
+    if tt in Punctuation:
+        return 'punc'
+    
+    # 공백/기타
+    if tt in (Text, Whitespace):
+        return 'text'
+    
     return 'text'
 
 COLOR_ALIASES = {
@@ -302,9 +340,9 @@ _FG_THEMES = {
 
     # 추가: Monokai 느낌
     'monokai-ish': {
-        'kw':'light magenta','str':'yellow','num':'light cyan','com':'dark gray',
-        'name':'white','func':'light green','cls':'light green,bold',
-        'op':'light gray','punc':'light gray','text':'light gray',
+        'kw':'#62EAFF','str':'yellow','num':'#9076FC','com':'#937F56',
+        'name':'white','func':'#8EE52E','cls':'#8EE52E',
+        'op':'#FF4686','punc':'white','text':'light gray',
     },
 
     # 추가: Dracula 느낌
@@ -373,9 +411,9 @@ _FG_THEMES = {
 
 # 각 라인 종류에 대한 테마 선택(초기값)
 _FG_MAP = {
-    'add': None,
-    'del': None,
-    'ctx': None,
+    'add': _FG_THEMES['monokai-ish'],  # None → 실제 테마로 변경
+    'del': _FG_THEMES['monokai-ish'],  # None → 실제 테마로 변경
+    'ctx': _FG_THEMES['monokai-ish'],  # None → 실제 테마로 변경
 }
 
 def set_diff_fg_theme(name_for_add: str, name_for_del: str, name_for_ctx: str):
@@ -461,7 +499,122 @@ def _mk_attr(fg: str, bg: str, fb_bg: str) -> urwid.AttrSpec:
         except Exception:
             return urwid.AttrSpec('white', fb_bg)
 
-set_diff_fg_theme('monokai-ish','monokai-ish','pastel')
+def _palette_put(name: str, fg: str, bg: str) -> None:
+    """
+    PALETTE 내 'name' 엔트리를 (fg,bg)로 교체하거나 없으면 추가.
+    fg/bg는 urwid 팔레트용 문자열이어야 합니다(AttrSpec 아님).
+    """
+    entry = (name, fg, bg)
+    for i, e in enumerate(PALETTE):
+        if isinstance(e, tuple) and e and e[0] == name:
+            PALETTE[i] = entry
+            return
+    PALETTE.append(entry)
+
+def _color_for_palette(spec: str, default: str = 'white') -> str:
+    """
+    - COLOR_ALIASES로 별칭을 정규화
+    - HEX(#rrggbb)이면 256색 안전값으로 강등(TRUECOLOR_FALLBACKS)
+    - 'light yellow' 같은 비표준 이름을 안전하게 처리
+    - 굵기 속성(,bold 등)은 그대로 유지
+    """
+    if not spec:
+        return default
+    color, attrs = _split_color_attrs(spec)  # 기존 함수 재사용
+    if color:
+        color = COLOR_ALIASES.get(color.lower(), color)
+        if isinstance(color, str) and color.startswith('#'):
+            color = TRUECOLOR_FALLBACKS.get(color.lower(), default)
+    out = color or default
+    if attrs:
+        out += ',' + attrs
+    return out
+
+def set_syntax_theme(name: str, preview_bg: str = PREVIEW_BG, also_apply_diff_code: bool = True) -> None:
+    """
+    _FG_THEMES[name]의 전경색 맵을 사용해
+    - syn_* 팔레트(프리뷰) 전경색을 적용하고,
+    - also_apply_diff_code=True면 diff_code_* 팔레트에도 동일 전경색을 적용합니다.
+    배경색:
+      - syn_*: preview_bg(PREVIEW_BG)
+      - diff_code_*: 'default' (라인 배경은 build_diff_line_text에서 Columns+SolidFill로 칠함)
+    """
+    if name not in _FG_THEMES:
+        raise KeyError(f"Unknown theme '{name}'. Available: {', '.join(sorted(_FG_THEMES.keys()))}")
+
+    theme = _FG_THEMES[name]
+
+    _palette_put('preview', 'default', preview_bg)
+    _palette_put('preview_border', 'dark gray', preview_bg)
+
+    # syn_* 매핑
+    syn_map = [
+        ('text', 'syn_text'),
+        ('kw',   'syn_kw'),
+        ('str',  'syn_str'),
+        ('num',  'syn_num'),
+        ('com',  'syn_com'),
+        ('name', 'syn_name'),
+        ('func', 'syn_func'),
+        ('cls',  'syn_class'),
+        ('op',   'syn_op'),
+        ('punc', 'syn_punc'),
+    ]
+    for key, attr_name in syn_map:
+        fg = _color_for_palette(theme.get(key, 'light gray'))
+        _palette_put(attr_name, fg, preview_bg)
+
+    # diff_code_* 매핑(옵션)
+    if also_apply_diff_code:
+        diff_code_map = [
+            ('text', 'diff_code_text'),
+            ('kw',   'diff_code_kw'),
+            ('str',  'diff_code_str'),
+            ('num',  'diff_code_num'),
+            ('com',  'diff_code_com'),
+            ('name', 'diff_code_name'),
+            ('func', 'diff_code_func'),
+            ('cls',  'diff_code_class'),
+            ('op',   'diff_code_op'),
+            ('punc', 'diff_code_punc'),
+        ]
+        for key, attr_name in diff_code_map:
+            fg = _color_for_palette(theme.get(key, 'light gray'))
+            _palette_put(attr_name, fg, 'default')
+
+# (선택) 프리뷰/디프를 모두 같은 테마로 쓰고 싶다면 아래처럼 한 번에 맞출 수도 있습니다.
+def set_global_theme(name: str) -> None:
+    """
+    프리뷰(syn_*/diff_code_*)와 diff 라인 렌더링(_FG_MAP)까지 모두 같은 테마로 통일.
+    이미 개별로 set_diff_fg_theme를 쓰고 있다면 이 함수는 호출하지 않아도 됩니다.
+    """
+    set_syntax_theme(name, preview_bg=PREVIEW_BG, also_apply_diff_code=True)
+    set_diff_fg_theme_all(name)  # 기존 함수 재사용
+
+def apply_palette_now(loop: Optional[urwid.MainLoop]) -> None:
+    """
+    현재 실행 중인 urwid MainLoop에 갱신된 PALETTE를 즉시 반영.
+    - 생성 이후 palette가 바뀐 경우 register_palette로 재등록해야 함.
+    """
+    if not loop:
+        return
+    try:
+        loop.screen.register_palette(PALETTE)
+        # 프리뷰 텍스트를 다시 한 번 set_text하여 리렌더 트리거(안전)
+        try:
+            w = loop.widget
+            # CodeDiffer 프레임일 때만 접근
+            if isinstance(w, urwid.Frame) and hasattr(w, 'body'):
+                # body가 Pile이고 마지막이 프리뷰일 수 있음
+                pass
+        except Exception:
+            pass
+        loop.draw_screen()
+    except Exception:
+        pass
+
+set_syntax_theme('monokai-ish', preview_bg=PREVIEW_BG, also_apply_diff_code=True)
+set_diff_fg_theme('monokai-ish','monokai-ish','monokai-ish')
 
 def _bg_for_kind(kind: str) -> tuple[str, str]:
     if kind == 'add': return (DIFF_ADD_BG, DIFF_ADD_BG_FALLBACK)
@@ -485,6 +638,7 @@ def build_diff_line_text(
     """
     bg, fb_bg = _bg_for_kind(kind)
     fgmap = _FG_MAP[kind]
+
 
     sign_char = '+' if kind == 'add' else '-' if kind == 'del' else ' '
     old_s = f"{old_no}" if old_no is not None else ""
@@ -514,6 +668,9 @@ def build_diff_line_text(
         if not v:
             continue
         base = _tok_base_for_diff(ttype)
+        if safe.strip().startswith('"""') or safe.strip() == '"""':
+            parts.append((_mk_attr(fgmap.get('com', 'dark gray'), bg, fb_bg), safe))
+            continue
         parts.append((_mk_attr(fgmap.get(base, 'white'), bg, fb_bg), v))
 
     # 핵심: 내용 텍스트 + 오른쪽 빈칸 채우기(filler)를 조합해 "화면 끝까지" 같은 배경 유지
@@ -567,104 +724,6 @@ def syntax_markup_segment(text: str, lexer) -> List:
             parts.append((_tok_to_diff_attr(ttype), value))
     except Exception:
         parts.append(('diff_code_text', text))
-    return parts
-
-def build_intraline_markup(old: str, new: str, lexer) -> Tuple[List, List]:
-    """
-    old(삭제줄), new(추가줄)에 대해 단어 수준 변경을 하이라이트하여
-    (old_markup, new_markup) 를 반환.
-    - equal 영역: syntax 하이라이트 사용
-    - old의 delete/replace: diff_intra_del
-    - new의 insert/replace: diff_intra_add
-    """
-    from difflib import SequenceMatcher
-    sm = SequenceMatcher(None, old, new)
-    old_parts: List = []
-    new_parts: List = []
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag == 'equal':
-            old_parts.extend(syntax_markup_segment(old[i1:i2], lexer))
-            new_parts.extend(syntax_markup_segment(new[j1:j2], lexer))
-        elif tag == 'delete':
-            old_parts.append(('diff_intra_del', old[i1:i2]))
-        elif tag == 'insert':
-            new_parts.append(('diff_intra_add', new[j1:j2]))
-        elif tag == 'replace':
-            old_parts.append(('diff_intra_del', old[i1:i2]))
-            new_parts.append(('diff_intra_add', new[j1:j2]))
-    return old_parts, new_parts
-
-def make_gutter(old_no: Optional[int], new_no: Optional[int], digits_old: int, digits_new: int, sign: str) -> urwid.Widget:
-    """
-    좌측 구터: [기호] [old_lno] [new_lno] │ 구성
-    """
-    sgn = urwid.Text(('diff_gutter', f"{sign} "), wrap='clip')
-    old_txt = urwid.Text(('diff_gutter', f"{(str(old_no) if old_no is not None else ''):>{digits_old}} "), wrap='clip')
-    new_txt = urwid.Text(('diff_gutter', f"{(str(new_no) if new_no is not None else ''):>{digits_new}} "), wrap='clip')
-    bar = urwid.Text(('diff_gutter', "│ "), wrap='clip')
-    return urwid.Columns([
-        ('pack', sgn),
-        ('pack', old_txt),
-        ('pack', new_txt),
-        ('pack', bar),
-    ], dividechars=0)
-
-# 위치: 기존 build_preview_line_markup_with_sign 아래 또는 유틸 섹션 가까이에 추가
-def build_diff_line_markup_preview_style(
-    path: Path,
-    line_text: str,
-    old_no: Optional[int],
-    new_no: Optional[int],
-    digits_old: int,
-    digits_new: int,
-    sign: str,
-    lexer=None
-) -> List:
-    """
-    preview 스타일 기반으로 diff 한 줄을 구성:
-    [sign] [old_lno] [new_lno] | [code...]
-    - sign: '+', '-', ' ' (색상은 diff_sign_*)
-    - old/new 라인 번호는 서로 다른 색(diff_lno_old/new)
-    - 구분자는 ASCII '| ' (폭 안정)
-    - 코드 본문은 syn_* 토큰(미리보기와 동일)을 사용
-    - 줄바꿈/CR 제거, 탭은 expandtabs(4) (기존 래퍼/정책 사용)
-    """
-    # sign 색상
-    if sign == '+':
-        sign_attr = 'diff_sign_add'
-    elif sign == '-':
-        sign_attr = 'diff_sign_del'
-    else:
-        sign_attr = 'diff_sign_ctx'
-
-    # lexer 준비 (기존 정책 유지)
-    try:
-        if lexer is None:
-            lexer = _get_lexer_for_path(path)
-    except Exception:
-        lexer = TextLexer()
-
-    # 탭 고정 폭 변환만 수행(기존 정책 유지, 줄바꿈 제거는 lex_line_no_newlines에서 일괄 처리)
-    safe_line = line_text.expandtabs(4)
-
-    parts: List = []
-    # [sign]
-    parts.append((sign_attr, f"{sign} "))
-    # [old_lno] [new_lno]
-    old_s = f"{old_no}" if old_no is not None else ""
-    new_s = f"{new_no}" if new_no is not None else ""
-    parts.append(('diff_lno_old', f"{old_s:>{digits_old}} "))
-    parts.append(('diff_lno_new', f"{new_s:>{digits_new}} "))
-    # 구분자
-    parts.append(('diff_sep', "│ "))
-
-    # 코드 토큰(미리보기 토큰 팔레트 syn_* 사용)
-    try:
-        for ttype, value in lex_line_no_newlines(lexer, safe_line):
-            parts.append((_tok_to_attr(ttype), value))
-    except Exception:
-        parts.append(('syn_text', safe_line))
-
     return parts
 
 _lexer_cache: Dict[str, Any] = {}
@@ -1139,7 +1198,6 @@ class PathCompleterWrapper(Completer):
         #    PathCompleter는 이제 'src/co'에 대한 제안('src/components/')을 올바르게 생성합니다.
         yield from self.path_completer.get_completions(doc_for_path, complete_event)
 
-
 class AttachedFileCompleter(Completer):
     """
     오직 '첨부된 파일 목록' 내에서만 경로 자동완성을 수행하는 전문 Completer.
@@ -1492,7 +1550,6 @@ class ModelSearcher:
             self._save_models()
         else:
             console.print("[dim]모델 선택이 취소되었습니다.[/dim]")
-        
 
 # ────────────────────────────────
 # 유틸 함수
@@ -1505,11 +1562,9 @@ def load_json(path: Path, default: Any) -> Any:
             return default
     return default
 
-
 def save_json(path: Path, data: Any) -> None:
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-
 
 # 세션/즐겨찾기
 def load_session(name: str) -> Dict[str, Any]:
@@ -1517,7 +1572,6 @@ def load_session(name: str) -> Dict[str, Any]:
     if isinstance(data, list):  # legacy
         data = {"messages": data, "model": "openai/gpt-4o"}
     return data
-
 
 def save_session(
     name: str, 
@@ -1621,6 +1675,88 @@ def snap_scroll_to_bottom() -> None:
     except Exception:
         pass
 
+def lex_file_by_lines(file_path: Path, lexer=None) -> Dict[int, List[Tuple]]:
+    """
+    파일 전체를 한 번에 렉싱한 후, 줄별로 토큰을 분리합니다.
+    이렇게 하면 멀티라인 docstring이 String.Doc으로 올바르게 인식됩니다.
+    
+    Returns:
+        Dict[int, List[Tuple]]: {줄번호(0-based): [(token_type, value), ...]}
+    """
+    try:
+        content = file_path.read_text(encoding='utf-8', errors='ignore')
+    except Exception:
+        return {}
+    
+    if lexer is None:
+        try:
+            lexer = _get_lexer_for_path(file_path)
+        except Exception:
+            lexer = TextLexer()
+    
+    # 전체 파일을 한 번에 렉싱
+    tokens = list(pyg_lex(content, lexer))
+    
+    # 줄별로 토큰 분리
+    line_tokens = {}
+    current_line = 0
+    current_line_tokens = []
+    
+    for ttype, value in tokens:
+        if not value:
+            continue
+        
+        # 멀티라인 값 처리
+        if '\n' in value:
+            lines = value.split('\n')
+            
+            # 첫 번째 줄 부분
+            if lines[0]:
+                current_line_tokens.append((ttype, lines[0]))
+            
+            # 첫 줄 저장
+            if current_line_tokens:
+                line_tokens[current_line] = current_line_tokens
+            
+            # 중간 줄들
+            for i in range(1, len(lines) - 1):
+                current_line += 1
+                if lines[i]:
+                    line_tokens[current_line] = [(ttype, lines[i])]
+                else:
+                    line_tokens[current_line] = []
+            
+            # 마지막 줄 시작
+            current_line += 1
+            current_line_tokens = []
+            if lines[-1]:
+                current_line_tokens.append((ttype, lines[-1]))
+        else:
+            # 단일 라인 토큰
+            current_line_tokens.append((ttype, value))
+    
+    # 마지막 줄 저장
+    if current_line_tokens:
+        line_tokens[current_line] = current_line_tokens
+    
+    return line_tokens
+
+class DiffListBox(urwid.ListBox):
+    """마우스 이벤트를 안전하게 처리하는 diff 전용 ListBox"""
+    
+    def mouse_event(self, size, event, button, col, row, focus):
+        """마우스 이벤트 처리"""
+        # 휠 스크롤만 처리
+        if button == 4:  # 휠 업
+            self.keypress(size, 'up')
+            return True
+        elif button == 5:  # 휠 다운
+            self.keypress(size, 'down')
+            return True
+        
+        # 클릭은 무시 (header/footer 깜빡임 방지)
+        return True
+
 class CodeDiffer:
     def __init__(self, attached_files: List[str], session_name: str, messages: List[Dict]):
         # 입력 데이터
@@ -1644,11 +1780,11 @@ class CodeDiffer:
         self.list_walker = urwid.SimpleFocusListWalker([])
         self.listbox = urwid.ListBox(self.list_walker)
         self.preview_text = urwid.Text("", wrap="clip")                         # flow
-        self.preview_body = urwid.AttrMap(self.preview_text, 'preview')         # 배경 스타일
+        self.preview_body = urwid.AttrMap(self.preview_text, {None: 'preview'})         # 배경 스타일
         self.preview_filler = urwid.Filler(self.preview_body, valign='top')     # flow → box
         self.preview_adapted = urwid.BoxAdapter(self.preview_filler, 1)         # 고정 높이(초기 1줄)
         self.preview_box = urwid.LineBox(self.preview_adapted, title="Preview") # 테두리(+2줄)
-        self.preview_widget = urwid.AttrMap(self.preview_box, 'preview_border') # 외곽 스타일
+        self.preview_widget = urwid.AttrMap(self.preview_box, {None:'preview_border'}) # 외곽 스타일
 
         self._visible_preview_lines: Optional[int] = None  # 동적 가시 줄수 캐시
         self.main_pile = urwid.Pile([self.listbox])
@@ -1799,7 +1935,10 @@ class CodeDiffer:
 
         self._update_preview()
 
-    def _update_preview(self):
+
+    # CodeDiffer._render_preview 메서드 수정
+    def _render_preview(self):
+        """파일 프리뷰를 렌더링 (전체 파일 렉싱 후 줄별 분리)"""
         item_id = self.previewing_item_id
         is_previewing = len(self.main_pile.contents) > 1
 
@@ -1815,10 +1954,11 @@ class CodeDiffer:
             return
 
         try:
-            all_lines = item_data['path'].read_text(encoding='utf-8', errors='ignore').splitlines()
+            file_path = item_data['path']
+            all_lines = file_path.read_text(encoding='utf-8', errors='ignore').splitlines()
             total = len(all_lines)
 
-            # 1) 가시 줄 수 산정 및 캐시
+            # 1) 가시 줄 수 산정
             visible_lines = self._calc_preview_visible_lines()
             self._visible_preview_lines = visible_lines
 
@@ -1832,30 +1972,63 @@ class CodeDiffer:
 
             # 3) 제목 갱신
             info = f" [{start+1}-{end}/{total}]"
-            self.preview_box.set_title(f"Preview: {item_data['path'].name}{info}")
+            self.preview_box.set_title(f"Preview: {file_path.name}{info}")
 
-            # 4) 문법 하이라이트 마크업 적용(줄바꿈 처리 방식은 현재 유지)
-            markup = build_syntax_markup_for_preview(item_data['path'], start, end)
+            # 4) 전체 파일 렉싱 (한 번만)
+            line_tokens_dict = lex_file_by_lines(file_path)
+            
+            # 5) 테마 가져오기
+            preview_theme = _FG_MAP.get('ctx', _FG_THEMES['monokai-ish'])
+            
+            markup = []
+            digits = max(2, len(str(total)))
+            
+            for idx in range(start, end):
+                # 줄번호
+                lno_attr = _mk_attr('dark gray', PREVIEW_BG, 'black')
+                markup.append((lno_attr, f"{idx+1:>{digits}} │ "))
+                
+                # 이미 렉싱된 토큰 사용
+                if idx in line_tokens_dict:
+                    for ttype, value in line_tokens_dict[idx]:
+                        base = _tok_base_for_diff(ttype)
+                        fg_color = preview_theme.get(base, 'white')
+                        attr = _mk_attr(fg_color, PREVIEW_BG, 'black')
+                        markup.append((attr, value.expandtabs(4)))
+                else:
+                    # 빈 줄이거나 토큰이 없는 경우
+                    pass
+                
+                # 줄바꿈 추가
+                if idx < end - 1:
+                    markup.append('\n')
+
+            # 6) 마크업 적용
             self.preview_text.set_text(markup)
 
-            # 5) 핵심: Filler를 BoxAdapter로 N줄 고정(본문 줄 수만)
-            # LineBox가 외곽에 +2줄을 더함
+            # 7) 높이 조정
             self.preview_adapted.height = visible_lines
 
-            # 6) Pile에 미부착 시 추가, 부착 시 교체
+            # 8) Pile에 추가/교체
             if not is_previewing:
                 self.main_pile.contents.append((self.preview_widget, self.main_pile.options('pack')))
             else:
                 self.main_pile.contents[-1] = (self.preview_widget, self.main_pile.options('pack'))
 
         except Exception as e:
-            self.preview_text.set_text(f"[Error]: {e}")
-            # 오류 시에도 높이 유지
+            error_attr = _mk_attr('light red', PREVIEW_BG, 'black')
+            self.preview_text.set_text([(error_attr, f"Preview error: {e}")])
             self.preview_adapted.height = max(1, self._visible_preview_lines or 1)
             if not is_previewing:
                 self.main_pile.contents.append((self.preview_widget, self.main_pile.options('pack')))
             else:
                 self.main_pile.contents[-1] = (self.preview_widget, self.main_pile.options('pack'))
+
+    # _update_preview 메서드도 수정 (단순히 _render_preview 호출)
+    def _update_preview(self):
+        """프리뷰 업데이트 - _render_preview를 호출"""
+        self._render_preview()  # item 파라미터는 사용하지 않으므로 None 전달
+
     def _input_filter(self, keys, raw):
         try:
             if self.main_loop and self.main_loop.widget is self.frame:
@@ -2009,6 +2182,8 @@ class CodeDiffer:
         widgets.append(urwid.Text(('diff_file_old', f"--- a/{old_item['path'].name}"), wrap='clip'))
         widgets.append(urwid.Text(('diff_file_new', f"+++ b/{new_item['path'].name}"), wrap='clip'))
 
+        
+
         # 헝크 파서
         old_ln = None
         new_ln = None
@@ -2077,8 +2252,12 @@ class CodeDiffer:
 
             i += 1
 
+
+        #black_filler = urwid.AttrMap(urwid.Text(''), urwid.AttrSpec('', 'black'))
+        #widgets.append(black_filler)
+
         diff_walker = urwid.SimpleFocusListWalker(widgets)
-        diff_listbox = urwid.ListBox(diff_walker)
+        diff_listbox = DiffListBox(diff_walker) #urwid.ListBox(diff_walker)
 
         header = urwid.AttrMap(
             urwid.Text(f"Diff: {old_item['path'].name} → {new_item['path'].name}", wrap='clip'),
@@ -2124,6 +2303,7 @@ class CodeDiffer:
             unhandled_input=self.handle_input,
             input_filter=self._input_filter
         )
+        apply_palette_now(self.main_loop)
         #try:
         self.main_loop.run()
         #finally:
@@ -2995,6 +3175,7 @@ COMMANDS = """
 /favs                         → 즐겨찾기 목록
 /edit                         → 외부 편집기로 긴 질문 작성
 /diff_code                    → 코드 블록 비교 뷰어 열기
+/theme                        → 코드 블록 테마 변경
 /reset                        → 세션 리셋 & 자동 백업
 /restore                      → 백업에서 세션 복원
 /show_context                 → 현재 컨텍스트 사용량 확인
@@ -3153,7 +3334,8 @@ def chat_mode(name: str, copy_clip: bool) -> None:
     console.print(Panel.fit(COMMANDS, title="[yellow]/명령어[/yellow]"))
     console.print(f"[cyan]세션('{current_session_name}') 시작 – 모델: {model}[/cyan]", highlight=False)
 
-    
+    # 현재 열린 CodeDiffer 인스턴스를 추적(있으면 팔레트 재적용)
+    differ_ref: Dict[str, Optional[CodeDiffer]] = {"inst": None}
     while True:
         try:
             # ✅ 루프 시작 시, 최신 'attached' 목록으로 completer를 업데이트!
@@ -3254,11 +3436,39 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                         f"누적 토큰 사용: {total_used:,}",
                         title="[cyan]컨텍스"))
                 continue
+
+            if cmd == "/theme":
+                if not args:
+                    console.print("[yellow]사용법: /theme <테마이름>[/yellow]")
+                    console.print(f"가능한 테마: {', '.join(sorted(_FG_THEMES.keys()))}")
+                    continue
+                theme_name = args[0]
+                try:
+                    # 프리뷰(syn_*) + diff 토큰(_FG_MAP) 모두 통일
+                    set_global_theme(theme_name)
+                    console.print(f"[green]테마 적용: {theme_name}[/green]")
+
+                    # 열려있는 urwid 화면이 있다면 즉시 재등록
+                    # - 현재 chat_mode는 prompt_toolkit 기반이므로 보통 None
+                    # - FileSelector/ModelSearcher/CodeDiffer 등 TUI 진입 후 변경하려면
+                    #   해당 루프 종료/재진입 또는 아래 훅으로 즉시 반영
+                    inst = differ_ref.get("inst")
+                    if inst and inst.main_loop:
+                        apply_palette_now(inst.main_loop)
+
+                except KeyError:
+                    console.print(f"[red]알 수 없는 테마: {theme_name}[/red]")
+                    console.print(f"가능한 테마: {', '.join(sorted(_FG_THEMES.keys()))}")
+                continue
+
             elif cmd == "/diff_code":
                 differ = CodeDiffer(attached, current_session_name, messages)
+                differ_ref["inst"] = differ
                 differ.start()
+                differ_ref["inst"] = None
                 snap_scroll_to_bottom()
                 continue
+
             elif cmd == "/pretty_print":
                 pretty_print_enabled = not pretty_print_enabled
                 status_text = "[green]활성화[/green]" if pretty_print_enabled else "[yellow]비활성화[/yellow]"
