@@ -746,10 +746,11 @@ def build_diff_line_text(
     digits_old: int,
     digits_new: int,
     lexer=None,
+    h_offset: int = 0,  # 가로 스크롤 오프셋 추가
     terminal_width: int = 200,  # 터미널 너비 파라미터 추가
 ) -> urwid.Text:
     """
-    터미널 너비를 고려한 정확한 패딩 버전
+    가로 스크롤이 적용된 diff 라인 렌더링
     """
     bg, fb_bg = _bg_for_kind(kind)
     fgmap = _FG_MAP.get(kind)
@@ -761,21 +762,27 @@ def build_diff_line_text(
     old_s = f"{old_no}" if old_no is not None else ""
     new_s = f"{new_no}" if new_no is not None else ""
 
-    # 구터 텍스트 생성 (길이 계산용)
-    gutter_text = f"{sign_char} {old_s:>{digits_old}} {new_s:>{digits_new}} │ "
-    gutter_len = len(gutter_text)
-    
     parts: List[Tuple[urwid.AttrSpec, str]] = []
     
-    # 구터 부분 추가
+    # 구터는 항상 표시 (스크롤 영향 없음)
     parts.append((_mk_attr(SIGN_FG[kind], bg, fb_bg), f"{sign_char} "))
     parts.append((_mk_attr(LNO_OLD_FG, bg, fb_bg), f"{old_s:>{digits_old}} "))
     parts.append((_mk_attr(LNO_NEW_FG, bg, fb_bg), f"{new_s:>{digits_new}} "))
     parts.append((_mk_attr(SEP_FG, bg, fb_bg), "│ "))
 
-    # 코드 토큰
+    # 코드 부분에 가로 오프셋 적용
     safe = code_line.expandtabs(4).replace('\n','').replace('\r','')
-    code_len = len(safe)
+    
+    # 오프셋 적용: h_offset 만큼 왼쪽 잘라냄
+    if h_offset > 0:
+        if h_offset < len(safe):
+            safe = safe[h_offset:]
+        else:
+            safe = ""  # 오프셋이 줄보다 길면 빈 문자열
+    
+    # 스크롤 표시: 왼쪽에 더 있으면 ← 표시
+    if h_offset > 0 and safe:
+        parts.append((_mk_attr('dark gray', bg, fb_bg), "←"))
     
     if lexer is None:
         try:
@@ -783,6 +790,7 @@ def build_diff_line_text(
         except Exception:
             lexer = TextLexer()
 
+    # 토큰화된 코드 추가
     for ttype, value in pyg_lex(safe, lexer):
         if not value:
             continue
@@ -792,13 +800,17 @@ def build_diff_line_text(
         base = _tok_base_for_diff(ttype)
         parts.append((_mk_attr(fgmap.get(base, 'white'), bg, fb_bg), v))
     
-    # 정확한 패딩 계산
-    content_len = gutter_len + code_len
-    padding_len = max(0, terminal_width - content_len)
-    if padding_len > 0:
-        parts.append((_mk_attr('default', bg, fb_bg), ' ' * padding_len))
+    # 오른쪽에 더 있으면 → 표시
+    original_len = len(code_line.expandtabs(4))
+    visible_len = len(safe)
+    if h_offset + visible_len < original_len:
+        parts.append((_mk_attr('dark gray', bg, fb_bg), "→"))
     
-    return urwid.Text(parts, wrap='any')
+    # 패딩
+    padding = ' ' * 200
+    parts.append((_mk_attr('default', bg, fb_bg), padding))
+    
+    return urwid.Text(parts, wrap='clip')
 
 def _tok_to_diff_attr(tt) -> str:
     from pygments.token import Keyword, String, Number, Comment, Name, Operator, Punctuation, Text, Whitespace
@@ -1901,7 +1913,7 @@ class CodeDiffer:
 
         self.list_walker = urwid.SimpleFocusListWalker([])
         self.listbox = urwid.ListBox(self.list_walker)
-        self.preview_text = urwid.Text("", wrap="any")                         # flow
+        self.preview_text = urwid.Text("", wrap='clip')                         # flow
         self.preview_body = urwid.AttrMap(self.preview_text, {None: 'preview'})         # 배경 스타일
         self.preview_filler = urwid.Filler(self.preview_body, valign='top')     # flow → box
         self.preview_adapted = urwid.BoxAdapter(self.preview_filler, 1)         # 고정 높이(초기 1줄)
@@ -1919,6 +1931,10 @@ class CodeDiffer:
         self._old_input_filter = None
         self._old_unhandled_input = None
         self._old_widget = None
+
+        self.h_offset = 0  # diff 뷰 가로 오프셋
+        self.preview_h_offset = 0  # preview 뷰 가로 오프셋
+        self.max_line_length = 0  # 현재 보이는 줄 중 최대 길이
 
     def _calc_preview_visible_lines(self) -> int:
         """
@@ -2257,8 +2273,233 @@ class CodeDiffer:
             # 기본 처리는 프레임으로
             self.frame.keypress(self.main_loop.screen_size, key)
 
-    # CodeDiffer 클래스 내부: _show_diff_view 전체 교체
     def _show_diff_view(self):
+        import re
+        if len(self.selected_for_diff) != 2:
+            return
+
+        item1, item2 = self.selected_for_diff
+        # old/new 결정(응답 순서 기준)
+        if item1.get("source") == "local" or item1.get("msg_id", 0) < item2.get("msg_id", 0):
+            old_item, new_item = item1, item2
+        else:
+            old_item, new_item = item2, item1
+
+        try:
+            old_text = old_item['path'].read_text(encoding='utf-8', errors='ignore')
+            new_text = new_item['path'].read_text(encoding='utf-8', errors='ignore')
+            old_lines = old_text.splitlines()
+            new_lines = new_text.splitlines()
+        except Exception as e:
+            self.footer.original_widget.set_text(f"Error: {e}")
+            return
+
+        diff = list(difflib.unified_diff(
+            old_lines, new_lines,
+            fromfile=f"a/{old_item['path'].name}",
+            tofile=f"b/{new_item['path'].name}",
+            lineterm='',
+            n=3
+        ))
+        if not diff:
+            self.footer.original_widget.set_text("두 파일이 동일합니다.")
+            return
+
+        # 필요한 변수들
+        digits_old = max(2, len(str(len(old_lines))))
+        digits_new = max(2, len(str(len(new_lines))))
+        
+        try:
+            lexer = _get_lexer_for_path(new_item['path'])
+        except Exception:
+            lexer = TextLexer()
+
+        # 가로 스크롤 상태
+        h_offset_ref = {'value': 0}
+        max_line_len = 0
+        
+        # diff 라인에서 최대 길이 계산
+        for line in diff:
+            if line and not line.startswith('@@'):
+                content = line[1:] if line[0] in '+-' else line
+                max_line_len = max(max_line_len, len(content.expandtabs(4)))
+
+        # diff 위젯 생성 함수
+        def generate_diff_widgets(h_offset: int) -> List[urwid.Widget]:
+            widgets: List[urwid.Widget] = []
+            
+            # 파일 헤더
+            widgets.append(urwid.Text(('diff_file_old', f"--- a/{old_item['path'].name}"), wrap='clip'))
+            widgets.append(urwid.Text(('diff_file_new', f"+++ b/{new_item['path'].name}"), wrap='clip'))
+            
+            # 헝크 파서
+            old_ln = None
+            new_ln = None
+            hunk_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+            
+            i = 0
+            while i < len(diff):
+                line = diff[i]
+
+                # 파일 헤더 스킵
+                if line.startswith('---') and i == 0:
+                    i += 1; continue
+                if line.startswith('+++') and i == 1:
+                    i += 1; continue
+
+                # 헝크 헤더
+                if line.startswith('@@'):
+                    m = hunk_re.match(line)
+                    if m:
+                        old_ln = int(m.group(1))
+                        new_ln = int(m.group(3))
+                    widgets.append(urwid.Text(('diff_hunk', line), wrap='clip'))
+                    i += 1
+                    continue
+
+                # 라인 생성 헬퍼
+                def emit_kind(kind: str, old_no: Optional[int], new_no: Optional[int], content: str):
+                    widgets.append(
+                        build_diff_line_text(
+                            kind=kind,
+                            code_line=content,
+                            old_no=old_no,
+                            new_no=new_no,
+                            digits_old=digits_old,
+                            digits_new=digits_new,
+                            lexer=lexer,
+                            h_offset=h_offset,  # 현재 오프셋 적용
+                        )
+                    )
+
+                # '-' 다음이 '+' 페어
+                if line.startswith('-') and i + 1 < len(diff) and diff[i+1].startswith('+'):
+                    old_line = line[1:]
+                    new_line = diff[i+1][1:]
+                    emit_kind('del', old_ln, None, old_line)
+                    emit_kind('add', None, new_ln, new_line)
+                    if old_ln is not None: old_ln += 1
+                    if new_ln is not None: new_ln += 1
+                    i += 2
+                    continue
+
+                # 단일 라인
+                if line.startswith('-'):
+                    emit_kind('del', old_ln, None, line[1:])
+                    if old_ln is not None: old_ln += 1
+                elif line.startswith('+'):
+                    emit_kind('add', None, new_ln, line[1:])
+                    if new_ln is not None: new_ln += 1
+                elif line.startswith(('---','+++')):
+                    widgets.append(urwid.Text(('diff_meta', line), wrap='clip'))
+                else:
+                    content = line[1:] if line.startswith(' ') else line
+                    emit_kind('ctx', old_ln, new_ln, content)
+                    if old_ln is not None: old_ln += 1
+                    if new_ln is not None: new_ln += 1
+
+                i += 1
+            
+            return widgets
+
+        # 초기 위젯 생성
+        diff_walker = urwid.SimpleFocusListWalker(generate_diff_widgets(0))
+        diff_listbox = DiffListBox(diff_walker)
+
+        header = urwid.AttrMap(
+            urwid.Text(f"Diff: {old_item['path'].name} → {new_item['path'].name}", wrap='clip'),
+            'header'
+        )
+        
+        # footer 업데이트 함수
+        def update_footer():
+            scroll_info = ""
+            if h_offset_ref['value'] > 0:
+                scroll_info = f" [H:{h_offset_ref['value']}]"
+            if max_line_len > 100:
+                scroll_info += f" [←→: 가로스크롤]"
+            
+            footer_text = f"PgUp/Dn: 스크롤 | Home/End: 처음/끝 | ←→: 가로 | Q: 닫기{scroll_info}"
+            return urwid.AttrMap(urwid.Text(footer_text, wrap='clip'), 'header')
+        
+        diff_footer = update_footer()
+        diff_frame = urwid.Frame(diff_listbox, header=header, footer=diff_footer)
+
+        # 기존 상태 백업
+        self._old_widget = self.main_loop.widget
+        self._old_unhandled_input = self.main_loop.unhandled_input
+        self._old_input_filter = self.main_loop.input_filter
+        self.main_loop.widget = diff_frame
+
+        # ✅ 핵심: diff 뷰 재생성 함수
+        def regenerate_diff_view():
+            # 현재 포커스 위치 저장
+            try:
+                current_focus = diff_listbox.focus_position
+            except:
+                current_focus = 0
+            
+            # 위젯 리스트 재생성
+            new_widgets = generate_diff_widgets(h_offset_ref['value'])
+            diff_walker[:] = new_widgets
+            
+            # 포커스 복원
+            if new_widgets:
+                diff_listbox.focus_position = min(current_focus, len(new_widgets) - 1)
+            
+            # footer 업데이트
+            diff_frame.footer = update_footer()
+            
+            # 화면 다시 그리기
+            self.main_loop.draw_screen()
+
+        # 키 처리
+        def diff_unhandled(key):
+            if isinstance(key, str):
+                if key.lower() == 'q':
+                    # 원래 상태 복원
+                    self.main_loop.widget = self._old_widget
+                    self.main_loop.unhandled_input = self._old_unhandled_input
+                    self.main_loop.input_filter = self._old_input_filter
+                    try:
+                        self.main_loop.draw_screen()
+                    except Exception:
+                        pass
+                
+                # ✅ 가로 스크롤 처리
+                elif key == 'right':
+                    if h_offset_ref['value'] < max_line_len - 40:  # 여유 40자
+                        h_offset_ref['value'] += 10
+                        regenerate_diff_view()
+                
+                elif key == 'left':
+                    if h_offset_ref['value'] > 0:
+                        h_offset_ref['value'] = max(0, h_offset_ref['value'] - 10)
+                        regenerate_diff_view()
+                
+                elif key == 'shift right':  # 빠른 스크롤
+                    if h_offset_ref['value'] < max_line_len - 40:
+                        h_offset_ref['value'] = min(max_line_len - 40, h_offset_ref['value'] + 30)
+                        regenerate_diff_view()
+                
+                elif key == 'shift left':  # 빠른 스크롤
+                    if h_offset_ref['value'] > 0:
+                        h_offset_ref['value'] = max(0, h_offset_ref['value'] - 30)
+                        regenerate_diff_view()
+                
+                elif key in ('home', 'g'):  # 줄 시작으로
+                    if h_offset_ref['value'] > 0:
+                        h_offset_ref['value'] = 0
+                        regenerate_diff_view()
+                
+                elif key in ('end', 'G'):  # 줄 끝으로
+                    if h_offset_ref['value'] < max_line_len - 40:
+                        h_offset_ref['value'] = max_line_len - 40
+                        regenerate_diff_view()
+
+        self.main_loop.unhandled_input = diff_unhandled
+    
+    def __show_diff_view(self):
         import re
         if len(self.selected_for_diff) != 2:
             return
@@ -2304,8 +2545,16 @@ class CodeDiffer:
         # 상단 파일 헤더(그냥 텍스트 한 줄씩)
         widgets.append(urwid.Text(('diff_file_old', f"--- a/{old_item['path'].name}"), wrap='clip'))
         widgets.append(urwid.Text(('diff_file_new', f"+++ b/{new_item['path'].name}"), wrap='clip'))
-
         
+        # 가로 스크롤 상태 초기화
+        h_offset_ref = {'value': 0}
+        max_line_len = 0
+        
+        # diff 라인 생성 시 최대 길이 계산
+        for line in diff:
+            if line and not line.startswith('@@'):
+                content = line[1:] if line[0] in '+-' else line
+                max_line_len = max(max_line_len, len(content.expandtabs(4)))
 
         # 헝크 파서
         old_ln = None
@@ -2337,6 +2586,7 @@ class CodeDiffer:
             except:
                 cols = 200  # 기본값
 
+            
             # 라인 방출 헬퍼: 라인 종류(kind)에 따라 '한 줄 전체 배경'으로 렌더
             def emit_kind(kind: str, old_no: Optional[int], new_no: Optional[int], content: str):
                 widgets.append(
@@ -2348,7 +2598,7 @@ class CodeDiffer:
                         digits_old=digits_old,
                         digits_new=digits_new,
                         lexer=lexer,
-                        terminal_width=cols
+                        h_offset=h_offset_ref['value'],  # 현재 오프셋 적용
                     )
                 )
 
@@ -2401,17 +2651,54 @@ class CodeDiffer:
         self._old_input_filter = self.main_loop.input_filter
         self.main_loop.widget = diff_frame
 
+        def update_footer():
+            scroll_info = ""
+            if h_offset_ref['value'] > 0:
+                scroll_info = f" [H:{h_offset_ref['value']}]"
+            if max_line_len > 100:  # 긴 줄이 있으면 표시
+                scroll_info += f" [←→: 가로스크롤]"
+            
+            diff_footer.original_widget.set_text(
+                f"PgUp/Dn: 스크롤 | Home/End: 처음/끝 | ←→: 가로 | Q: 닫기{scroll_info}"
+            )
+
         # q로 닫기
         def diff_unhandled(key):
-            if isinstance(key, str) and key.lower() == 'q':
-                self.main_loop.widget = self._old_widget
-                self.main_loop.unhandled_input = self._old_unhandled_input
-                self.main_loop.input_filter = self._old_input_filter
-                try: self.main_loop.draw_screen()
-                except Exception: pass
+            if isinstance(key, str):
+                if key.lower() == 'q':
+                    # 원래 상태 복원
+                    self.main_loop.widget = self._old_widget
+                    self.main_loop.unhandled_input = self._old_unhandled_input
+                    self.main_loop.input_filter = self._old_input_filter
+                    try:
+                        self.main_loop.draw_screen()
+                    except Exception:
+                        pass
+                
+                # 가로 스크롤 처리
+                elif key == 'right':
+                    if h_offset_ref['value'] < max_line_len - 80:  # 터미널 너비 고려
+                        h_offset_ref['value'] += 10  # 10자씩 스크롤
+                        # diff 위젯 재생성
+                        regenerate_diff_view()
+                
+                elif key == 'left':
+                    if h_offset_ref['value'] > 0:
+                        h_offset_ref['value'] = max(0, h_offset_ref['value'] - 10)
+                        regenerate_diff_view()
+                
+                elif key == 'home':
+                    h_offset_ref['value'] = 0
+                    regenerate_diff_view()
 
+        def regenerate_diff_view():
+            # 위젯 리스트 재생성 (간단한 방법)
+            # 실제로는 더 효율적인 방법이 있지만 복잡함
+            update_footer()
+            self.main_loop.draw_screen()
+        
         self.main_loop.unhandled_input = diff_unhandled
-
+        update_footer()
 
     def start(self):
         self._render_all(keep_focus=False)
