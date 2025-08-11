@@ -215,6 +215,12 @@ PALETTE.extend([
     ('diff_sep',     'dark gray',   'default'),
 ])
 
+PALETTE.extend([
+    ('syn_doc', 'dark gray', PREVIEW_BG),        # docstring용 팔레트
+    ('diff_code_doc', 'dark gray', 'default'),   # diff에서 docstring용
+])
+
+
 #TRIMMED_HISTORY = 20
 DEFAULT_CONTEXT_LENGTH = 200000
 CONTEXT_TRIM_RATIO = 0.7
@@ -267,7 +273,7 @@ def _tok_base_for_diff(tt) -> str:
     
     # Docstring을 주석으로 처리 (Pygments가 이미 정확히 분류함)
     if tt in String.Doc or tt == String.Doc:
-        return 'com'
+        return 'doc'
     
     # 멀티라인 문자열도 주석으로 처리하고 싶다면
     if tt == String.Double.Triple or tt == String.Single.Triple:
@@ -320,92 +326,202 @@ COLOR_ALIASES = {
     'pastel-yellow': '#ffee8c',
 }
 
-# HEX가 안 되는 환경(256색)에서 근사치로 강등
 TRUECOLOR_FALLBACKS = {
-    '#fffacd': 'yellow',  # lemon chiffon → yellow 근사
-    '#fffeed': 'white',   # 매우 밝은 옐로우 → white 근사
-    '#ffee8c': 'yellow',  # 파스텔 옐로우 → yellow 근사
-    '#ffd3ac': 'yellow',  # peach 톤
-    '#ffdbbb': 'yellow',  # light orange 톤
+    # 기존 항목들
+    '#fffacd': 'yellow',  
+    '#fffeed': 'white',   
+    '#ffee8c': 'yellow',  
+    '#ffd3ac': 'yellow',  
+    '#ffdbbb': 'yellow',  
+    
+    # 유명 테마 색상들 추가
+    # VS Code Dark+
+    '#569cd6': 'light blue',      # 키워드
+    '#ce9178': 'brown',           # 문자열
+    '#b5cea8': 'light green',     # 숫자
+    '#608b4e': 'dark green',      # 주석
+    '#dcdcaa': 'yellow',          # 함수
+    '#4ec9b0': 'light cyan',      # 클래스
+    
+    # Monokai
+    '#f92672': 'light magenta',   # 키워드
+    '#e6db74': 'yellow',          # 문자열
+    '#ae81ff': 'light magenta',   # 숫자
+    '#75715e': 'brown',           # 주석
+    '#a6e22e': 'light green',     # 함수
+    '#66d9ef': 'light cyan',      # 클래스
+    
+    # GitHub Dark
+    '#ff7b72': 'light red',       # 키워드
+    '#a5d6ff': 'light cyan',      # 문자열
+    '#79c0ff': 'light blue',      # 숫자
+    '#8b949e': 'dark gray',       # 주석
+    '#d2a8ff': 'light magenta',   # 함수
+    '#ffa657': 'yellow',          # 클래스
 }
 
-# 각 라인 종류에 대한 테마 선택
 _FG_THEMES = {
-    # 기존
-    'solarized-ish': {
-        'kw':'light magenta','str':'light green','num':'yellow','com':'dark gray',
-        'name':'white','func':'light cyan','cls':'light cyan,bold',
-        'op':'light gray','punc':'light gray','text':'light gray',
+    # VS Code Dark+ (정확한 색상)
+    'vscode-dark': {
+        'kw': '#569cd6',       # 파란색 키워드
+        'str': '#ce9178',      # 주황빛 갈색 문자열
+        'num': '#b5cea8',      # 연녹색 숫자
+        'com': '#6a9955',      # 녹색 주석
+        'doc': '#608b4e',      # 더 진한 녹색 docstring
+        'name': '#9cdcfe',     # 연한 파란색 변수
+        'func': '#dcdcaa',     # 노란색 함수
+        'cls': '#4ec9b0',      # 청록색 클래스
+        'op': '#d4d4d4',       # 밝은 회색 연산자
+        'punc': '#d4d4d4',     # 밝은 회색 구두점
+        'text': '#d4d4d4',     # 기본 텍스트
     },
-
-    # 추가: Monokai 느낌
+    
+    # Sublime Text - Monokai (정확한 색상)
+    'monokai': {
+        'kw': '#f92672',       # 핑크 키워드
+        'str': '#e6db74',      # 노란색 문자열
+        'num': '#ae81ff',      # 보라색 숫자
+        'com': '#75715e',      # 갈색 주석
+        'doc': '#75715e',      # 갈색 docstring
+        'name': '#f8f8f2',     # 흰색 변수
+        'func': '#a6e22e',     # 녹색 함수
+        'cls': '#66d9ef',      # 청록색 클래스
+        'op': '#f92672',       # 핑크 연산자
+        'punc': '#f8f8f2',     # 흰색 구두점
+        'text': '#f8f8f2',     # 기본 텍스트
+    },
+    
+    # GitHub Dark (정확한 색상)
+    'github-dark': {
+        'kw': '#ff7b72',       # 연한 빨강 키워드
+        'str': '#a5d6ff',      # 연한 하늘색 문자열
+        'num': '#79c0ff',      # 파란색 숫자
+        'com': '#8b949e',      # 회색 주석
+        'doc': '#8b949e',      # 회색 docstring
+        'name': '#c9d1d9',     # 밝은 회색 변수
+        'func': '#d2a8ff',     # 연보라 함수
+        'cls': '#ffa657',      # 주황색 클래스
+        'op': '#ff7b72',       # 연한 빨강 연산자
+        'punc': '#c9d1d9',     # 밝은 회색 구두점
+        'text': '#c9d1d9',     # 기본 텍스트
+    },
+    
+    # Dracula (정확한 색상)
+    'dracula': {
+        'kw': '#ff79c6',       # 핑크 키워드
+        'str': '#f1fa8c',      # 노란색 문자열
+        'num': '#bd93f9',      # 보라색 숫자
+        'com': '#6272a4',      # 파란 회색 주석
+        'doc': '#6272a4',      # 파란 회색 docstring
+        'name': '#f8f8f2',     # 흰색 변수
+        'func': '#50fa7b',     # 녹색 함수
+        'cls': '#8be9fd',      # 청록색 클래스
+        'op': '#ff79c6',       # 핑크 연산자
+        'punc': '#f8f8f2',     # 흰색 구두점
+        'text': '#f8f8f2',     # 기본 텍스트
+    },
+    
+    # One Dark (Atom)
+    'one-dark': {
+        'kw': '#c678dd',       # 보라색 키워드
+        'str': '#98c379',      # 녹색 문자열
+        'num': '#d19a66',      # 주황색 숫자
+        'com': '#5c6370',      # 회색 주석
+        'doc': '#5c6370',      # 회색 docstring
+        'name': '#abb2bf',     # 밝은 회색 변수
+        'func': '#61afef',     # 파란색 함수
+        'cls': '#e06c75',      # 빨간색 클래스
+        'op': '#56b6c2',       # 청록색 연산자
+        'punc': '#abb2bf',     # 밝은 회색 구두점
+        'text': '#abb2bf',     # 기본 텍스트
+    },
+    
+    # Solarized Dark
+    'solarized-dark': {
+        'kw': '#859900',       # 녹색 키워드
+        'str': '#2aa198',      # 청록색 문자열
+        'num': '#d33682',      # 자홍색 숫자
+        'com': '#586e75',      # 회색 주석
+        'doc': '#586e75',      # 회색 docstring
+        'name': '#839496',     # 밝은 회색 변수
+        'func': '#268bd2',     # 파란색 함수
+        'cls': '#cb4b16',      # 주황색 클래스
+        'op': '#859900',       # 녹색 연산자
+        'punc': '#839496',     # 밝은 회색 구두점
+        'text': '#839496',     # 기본 텍스트
+    },
+    
+    # Tokyo Night
+    'tokyo-night': {
+        'kw': '#bb9af7',       # 연보라 키워드
+        'str': '#9ece6a',      # 녹색 문자열
+        'num': '#ff9e64',      # 주황색 숫자
+        'com': '#565f89',      # 어두운 파란 회색 주석
+        'doc': '#565f89',      # 어두운 파란 회색 docstring
+        'name': '#c0caf5',     # 연한 파란색 변수
+        'func': '#7aa2f7',     # 파란색 함수
+        'cls': '#ff9e64',      # 주황색 클래스
+        'op': '#bb9af7',       # 연보라 연산자
+        'punc': '#c0caf5',     # 연한 파란색 구두점
+        'text': '#c0caf5',     # 기본 텍스트
+    },
+    
+    # Gruvbox Dark
+    'gruvbox-dark': {
+        'kw': '#fb4934',       # 빨간색 키워드
+        'str': '#b8bb26',      # 녹색 문자열
+        'num': '#d3869b',      # 분홍색 숫자
+        'com': '#928374',      # 회색 주석
+        'doc': '#928374',      # 회색 docstring
+        'name': '#ebdbb2',     # 베이지색 변수
+        'func': '#fabd2f',     # 노란색 함수
+        'cls': '#8ec07c',      # 청록색 클래스
+        'op': '#fe8019',       # 주황색 연산자
+        'punc': '#ebdbb2',     # 베이지색 구두점
+        'text': '#ebdbb2',     # 기본 텍스트
+    },
+    
+    # Nord
+    'nord': {
+        'kw': '#81a1c1',       # 파란색 키워드
+        'str': '#a3be8c',      # 녹색 문자열
+        'num': '#b48ead',      # 보라색 숫자
+        'com': '#616e88',      # 회색 주석
+        'doc': '#616e88',      # 회색 docstring
+        'name': '#d8dee9',     # 밝은 회색 변수
+        'func': '#88c0d0',     # 청록색 함수
+        'cls': '#8fbcbb',      # 연청록색 클래스
+        'op': '#81a1c1',       # 파란색 연산자
+        'punc': '#d8dee9',     # 밝은 회색 구두점
+        'text': '#d8dee9',     # 기본 텍스트
+    },
+    
+    # 레트로 터미널 (녹색 인광)
+    'retro-green': {
+        'kw': '#00ff00',       # 밝은 녹색
+        'str': '#00ff00',      # 밝은 녹색
+        'num': '#00ff00',      # 밝은 녹색
+        'com': '#008000',      # 어두운 녹색
+        'doc': '#008000',      # 어두운 녹색
+        'name': '#00ff00',     # 밝은 녹색
+        'func': '#00ff00',     # 밝은 녹색
+        'cls': '#00ff00',      # 밝은 녹색
+        'op': '#00ff00',       # 밝은 녹색
+        'punc': '#00ff00',     # 밝은 녹색
+        'text': '#00ff00',     # 밝은 녹색
+    },
+    
+    # 기존 테마들도 유지 (호환성)
     'monokai-ish': {
-        'kw':'#62EAFF','str':'yellow','num':'#9076FC','com':'#937F56',
-        'name':'white','func':'#8EE52E','cls':'#8EE52E',
+        'kw':'#62EAFF','str':'#e6db74','num':'#9076FC','com':'#937F56',
+        'doc':'#75715e','name':'white','func':'#8EE52E','cls':'#8EE52E',
         'op':'#FF4686','punc':'white','text':'light gray',
     },
-
-    # 추가: Dracula 느낌
-    'dracula-ish': {
-        'kw':'light magenta','str':'light yellow','num':'light cyan','com':'dark gray',
-        'name':'white','func':'light green','cls':'light green,bold',
-        'op':'light gray','punc':'light gray','text':'light gray',
-    },
-
-    # 추가: Nord 느낌
-    'nord-ish': {
-        'kw':'light cyan','str':'light green','num':'light blue','com':'dark gray',
-        'name':'white','func':'light cyan','cls':'light cyan,bold',
-        'op':'light gray','punc':'light gray','text':'light gray',
-    },
-
-    # 추가: Gruvbox Dark 느낌
-    'gruvbox-dark-ish': {
-        'kw':'yellow','str':'light green','num':'light cyan','com':'brown',
-        'name':'white','func':'light cyan','cls':'light cyan,bold',
-        'op':'light gray','punc':'light gray','text':'light gray',
-    },
-
-    # 추가: One Dark 느낌
-    'one-dark-ish': {
-        'kw':'light blue','str':'light green','num':'light magenta','com':'dark gray',
-        'name':'white','func':'light cyan','cls':'light cyan,bold',
-        'op':'light gray','punc':'light gray','text':'light gray',
-    },
-
-    # 추가: Tokyo Night 느낌
-    'tokyo-night-ish': {
-        'kw':'light blue','str':'light yellow','num':'light cyan','com':'dark gray',
-        'name':'white','func':'light cyan','cls':'light cyan,bold',
-        'op':'light gray','punc':'light gray','text':'light gray',
-    },
-
-    # 추가: 파스텔 톤
+    
     'pastel': {
-        'kw':'light magenta','str':'light yellow','num':'light cyan','com':'light gray',
-        'name':'white','func':'light cyan','cls':'light cyan,bold',
+        'kw':'light magenta','str':'yellow','num':'light cyan','com':'light gray',
+        'doc':'light gray','name':'white','func':'light cyan','cls':'light cyan,bold',
         'op':'light gray','punc':'light gray','text':'white',
-    },
-
-    # 추가: Matrix 그린 콘솔
-    'matrix-green': {
-        'kw':'light green','str':'light green','num':'light green','com':'dark gray',
-        'name':'light green','func':'light green,bold','cls':'light green,bold',
-        'op':'light green','punc':'light green','text':'light green',
-    },
-
-    # 추가: 밝은 종이 느낌(라이트 배경에 적합한 어두운 잉크)
-    'paper-light': {
-        'kw':'dark blue','str':'dark green','num':'dark magenta','com':'dark gray',
-        'name':'black','func':'dark cyan','cls':'dark cyan,bold',
-        'op':'black','punc':'black','text':'black',
-    },
-
-    # 추가: 고대비 비비드
-    'vivid-contrast': {
-        'kw':'light magenta,bold','str':'yellow,bold','num':'light cyan,bold','com':'light gray',
-        'name':'white,bold','func':'light green,bold','cls':'light green,bold',
-        'op':'white','punc':'white','text':'white',
     },
 }
 
@@ -429,8 +545,6 @@ def set_diff_fg_theme(name_for_add: str, name_for_del: str, name_for_ctx: str):
 # 필요 시, 한 가지 테마를 세 종류 모두에 적용하는 헬퍼
 def set_diff_fg_theme_all(name: str):
     set_diff_fg_theme(name, name, name)
-
-
 
 def _split_color_attrs(spec: str) -> tuple[str, str]:
     """
@@ -480,20 +594,14 @@ def _demote_truecolor_to_256(spec: str, default: str = 'white') -> str:
     return out
 
 def _mk_attr(fg: str, bg: str, fb_bg: str) -> urwid.AttrSpec:
-    """
-    - 에일리어스/HEX 지원
-    - 실패 시 256색 근사 및 배경 폴백 사용
-    """
     fg_norm = _normalize_color_spec(fg) if fg else fg
     bg_norm = _normalize_color_spec(bg) if bg else bg
     try:
         return urwid.AttrSpec(fg_norm, bg_norm)
     except Exception:
-        # 전/배경 각각 256색 근사로 강등
+        # 폴백
         fg_f = _demote_truecolor_to_256(fg_norm, default='white') if fg_norm else fg_norm
-        # 배경은 지정한 fb_bg도 고려
         bg_f = _demote_truecolor_to_256(bg_norm, default=fb_bg) if bg_norm else fb_bg
-        # 그래도 실패하면 최후의 안전값
         try:
             return urwid.AttrSpec(fg_f, bg_f)
         except Exception:
@@ -511,6 +619,7 @@ def _palette_put(name: str, fg: str, bg: str) -> None:
             return
     PALETTE.append(entry)
 
+
 def _color_for_palette(spec: str, default: str = 'white') -> str:
     """
     - COLOR_ALIASES로 별칭을 정규화
@@ -522,9 +631,15 @@ def _color_for_palette(spec: str, default: str = 'white') -> str:
         return default
     color, attrs = _split_color_attrs(spec)  # 기존 함수 재사용
     if color:
-        color = COLOR_ALIASES.get(color.lower(), color)
+        # 1. 별칭 체크
+        color_lower = color.lower()
+        if color_lower in COLOR_ALIASES:
+            color = COLOR_ALIASES[color_lower]
+        
         if isinstance(color, str) and color.startswith('#'):
-            color = TRUECOLOR_FALLBACKS.get(color.lower(), default)
+            if color.startswith('#'):
+                color = TRUECOLOR_FALLBACKS.get(color_lower, default)
+    
     out = color or default
     if attrs:
         out += ',' + attrs
@@ -554,6 +669,7 @@ def set_syntax_theme(name: str, preview_bg: str = PREVIEW_BG, also_apply_diff_co
         ('str',  'syn_str'),
         ('num',  'syn_num'),
         ('com',  'syn_com'),
+        ('doc',  'syn_doc'),
         ('name', 'syn_name'),
         ('func', 'syn_func'),
         ('cls',  'syn_class'),
@@ -561,7 +677,7 @@ def set_syntax_theme(name: str, preview_bg: str = PREVIEW_BG, also_apply_diff_co
         ('punc', 'syn_punc'),
     ]
     for key, attr_name in syn_map:
-        fg = _color_for_palette(theme.get(key, 'light gray'))
+        fg = _color_for_palette(theme.get(key, theme.get('com', 'dark gray')))  # doc 없으면 com으로 폴백
         _palette_put(attr_name, fg, preview_bg)
 
     # diff_code_* 매핑(옵션)
@@ -572,6 +688,7 @@ def set_syntax_theme(name: str, preview_bg: str = PREVIEW_BG, also_apply_diff_co
             ('str',  'diff_code_str'),
             ('num',  'diff_code_num'),
             ('com',  'diff_code_com'),
+            ('doc',  'diff_code_doc'),
             ('name', 'diff_code_name'),
             ('func', 'diff_code_func'),
             ('cls',  'diff_code_class'),
@@ -579,7 +696,7 @@ def set_syntax_theme(name: str, preview_bg: str = PREVIEW_BG, also_apply_diff_co
             ('punc', 'diff_code_punc'),
         ]
         for key, attr_name in diff_code_map:
-            fg = _color_for_palette(theme.get(key, 'light gray'))
+            fg = _color_for_palette(theme.get(key, theme.get('com', 'dark gray')))  # doc 없으면 com으로 폴백
             _palette_put(attr_name, fg, 'default')
 
 # (선택) 프리뷰/디프를 모두 같은 테마로 쓰고 싶다면 아래처럼 한 번에 맞출 수도 있습니다.
@@ -668,9 +785,6 @@ def build_diff_line_text(
         if not v:
             continue
         base = _tok_base_for_diff(ttype)
-        if safe.strip().startswith('"""') or safe.strip() == '"""':
-            parts.append((_mk_attr(fgmap.get('com', 'dark gray'), bg, fb_bg), safe))
-            continue
         parts.append((_mk_attr(fgmap.get(base, 'white'), bg, fb_bg), v))
 
     # 핵심: 내용 텍스트 + 오른쪽 빈칸 채우기(filler)를 조합해 "화면 끝까지" 같은 배경 유지
@@ -1280,6 +1394,20 @@ class ConditionalCompleter(Completer):
         
 
         # mode 선택
+
+        if stripped_text.startswith('/theme'):
+            words = stripped_text.split()
+            # "/theme" 또는 "/theme v" 처럼 테마명 입력 중
+            if len(words) <= 1 or (len(words) == 2 and not text.endswith(' ')):
+                # 테마 목록 자동완성
+                theme_names = sorted(_FG_THEMES.keys())
+                theme_completer = FuzzyCompleter(
+                    WordCompleter(theme_names, ignore_case=True, 
+                                meta_dict={name: "코드 하이라이트 테마" for name in theme_names})
+                )
+                yield from theme_completer.get_completions(document, complete_event)
+                return
+            
         if stripped_text.startswith('/mode'):
             words = stripped_text.split()
 
