@@ -2073,10 +2073,8 @@ class CodeDiffer:
 
         self._update_preview()
 
-
-    # CodeDiffer._render_preview 메서드 수정
     def _render_preview(self):
-        """파일 프리뷰를 렌더링 (전체 파일 렉싱 후 줄별 분리)"""
+        """파일 프리뷰를 렌더링 (가로 스크롤 지원)"""
         item_id = self.previewing_item_id
         is_previewing = len(self.main_pile.contents) > 1
 
@@ -2100,7 +2098,7 @@ class CodeDiffer:
             visible_lines = self._calc_preview_visible_lines()
             self._visible_preview_lines = visible_lines
 
-            # 2) 오프셋 보정
+            # 2) 세로 오프셋 보정
             max_offset = max(0, total - visible_lines)
             if self.preview_offset > max_offset:
                 self.preview_offset = max_offset
@@ -2108,14 +2106,22 @@ class CodeDiffer:
             start = self.preview_offset
             end = min(start + visible_lines, total)
 
-            # 3) 제목 갱신
+            # 3) 최대 줄 길이 계산 (가로 스크롤 범위 결정용)
+            visible_line_texts = all_lines[start:end]
+            self.max_line_length = max(len(line.expandtabs(4)) for line in visible_line_texts) if visible_line_texts else 0
+
+            # 4) 제목 갱신 (가로 스크롤 정보 포함)
             info = f" [{start+1}-{end}/{total}]"
+            if self.preview_h_offset > 0:
+                info += f" [H:{self.preview_h_offset}]"
+            if self.max_line_length > 100:
+                info += " [←→]"
             self.preview_box.set_title(f"Preview: {file_path.name}{info}")
 
-            # 4) 전체 파일 렉싱 (한 번만)
+            # 5) 전체 파일 렉싱 (한 번만)
             line_tokens_dict = lex_file_by_lines(file_path)
             
-            # 5) 테마 가져오기
+            # 6) 테마 가져오기
             preview_theme = _FG_MAP.get('ctx', _FG_THEMES['monokai-ish'])
             
             markup = []
@@ -2126,29 +2132,67 @@ class CodeDiffer:
                 lno_attr = _mk_attr('dark gray', PREVIEW_BG, 'black')
                 markup.append((lno_attr, f"{idx+1:>{digits}} │ "))
                 
-                # 이미 렉싱된 토큰 사용
-                if idx in line_tokens_dict:
-                    for ttype, value in line_tokens_dict[idx]:
-                        base = _tok_base_for_diff(ttype)
-                        fg_color = preview_theme.get(base, 'white')
-                        attr = _mk_attr(fg_color, PREVIEW_BG, 'black')
-                        markup.append((attr, value.expandtabs(4)))
+                # 가로 오프셋 적용을 위한 코드 재구성
+                line_text = all_lines[idx].expandtabs(4)
+                
+                # 가로 오프셋 적용
+                if self.preview_h_offset > 0:
+                    # 왼쪽에 더 있음을 표시
+                    if line_text and self.preview_h_offset < len(line_text):
+                        markup.append((_mk_attr('dark gray', PREVIEW_BG, 'black'), "←"))
+                        # 오프셋만큼 잘라냄
+                        visible_text = line_text[self.preview_h_offset:]
+                    else:
+                        visible_text = ""
                 else:
-                    # 빈 줄이거나 토큰이 없는 경우
-                    pass
+                    visible_text = line_text
+                
+                # 토큰화된 렌더링
+                if idx in line_tokens_dict:
+                    # 오프셋이 적용된 visible_text를 다시 토큰화해야 함
+                    # 하지만 이미 토큰화된 데이터가 있으므로, 위치 기반으로 처리
+                    accumulated_pos = 0
+                    for ttype, value in line_tokens_dict[idx]:
+                        token_start = accumulated_pos
+                        token_end = accumulated_pos + len(value)
+                        
+                        # 토큰이 가시 영역에 포함되는지 확인
+                        if token_end > self.preview_h_offset:
+                            # 토큰의 가시 부분만 추출
+                            if token_start < self.preview_h_offset:
+                                # 토큰의 일부가 잘림
+                                visible_value = value[self.preview_h_offset - token_start:]
+                            else:
+                                # 토큰 전체가 보임
+                                visible_value = value
+                            
+                            base = _tok_base_for_diff(ttype)
+                            fg_color = preview_theme.get(base, 'white')
+                            attr = _mk_attr(fg_color, PREVIEW_BG, 'black')
+                            markup.append((attr, visible_value))
+                        
+                        accumulated_pos = token_end
+                else:
+                    # 토큰 정보가 없으면 일반 텍스트로
+                    if visible_text:
+                        attr = _mk_attr('light gray', PREVIEW_BG, 'black')
+                        markup.append((attr, visible_text))
+                
+                # 오른쪽에 더 있음을 표시
+                if self.preview_h_offset + len(visible_text) < len(line_text):
+                    markup.append((_mk_attr('dark gray', PREVIEW_BG, 'black'), "→"))
                 
                 # 줄바꿈 추가
                 if idx < end - 1:
                     markup.append('\n')
 
-            # 6) 마크업 적용
+            # 7) 마크업 적용
             self.preview_text.set_text(markup)
-            #self.preview_text = urwid.Text(markup, wrap='any')  # wrap 옵션 추가
 
-            # 7) 높이 조정
+            # 8) 높이 조정
             self.preview_adapted.height = visible_lines
 
-            # 8) Pile에 추가/교체
+            # 9) Pile에 추가/교체
             if not is_previewing:
                 self.main_pile.contents.append((self.preview_widget, self.main_pile.options('pack')))
             else:
@@ -2232,6 +2276,49 @@ class CodeDiffer:
     def handle_input(self, key):
         if not isinstance(key, str):
             return
+        
+        # preview 가로 스크롤 처리
+        if self.previewing_item_id:
+            handled = False
+            
+            if key == 'right':
+                if self.preview_h_offset < self.max_line_length - 40:
+                    self.preview_h_offset += 10
+                    self._update_preview()
+                    handled = True
+            
+            elif key == 'left':
+                if self.preview_h_offset > 0:
+                    self.preview_h_offset = max(0, self.preview_h_offset - 10)
+                    self._update_preview()
+                    handled = True
+            
+            elif key == 'shift right':
+                if self.preview_h_offset < self.max_line_length - 40:
+                    self.preview_h_offset = min(self.max_line_length - 40, self.preview_h_offset + 30)
+                    self._update_preview()
+                    handled = True
+            
+            elif key == 'shift left':
+                if self.preview_h_offset > 0:
+                    self.preview_h_offset = max(0, self.preview_h_offset - 30)
+                    self._update_preview()
+                    handled = True
+            
+            elif key in ('home', 'g'):
+                if self.preview_h_offset > 0:
+                    self.preview_h_offset = 0
+                    self._update_preview()
+                    handled = True
+            
+            elif key in ('end', 'G'):
+                if self.preview_h_offset < self.max_line_length - 40:
+                    self.preview_h_offset = max(0, self.max_line_length - 40)
+                    self._update_preview()
+                    handled = True
+            
+            if handled:
+                return
 
         try:
             pos = self.listbox.focus_position
