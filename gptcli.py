@@ -739,41 +739,46 @@ def _bg_for_kind(kind: str) -> tuple[str, str]:
     return (DIFF_CTX_BG, DIFF_CTX_BG_FALLBACK)
 
 def build_diff_line_text(
-    kind: str,                # 'add' | 'del' | 'ctx'
-    code_line: str,           # 개행 없는 한 줄
+    kind: str,
+    code_line: str,
     old_no: Optional[int],
     new_no: Optional[int],
     digits_old: int,
     digits_new: int,
     lexer=None,
-) -> urwid.Widget:
+    terminal_width: int = 200,  # 터미널 너비 파라미터 추가
+) -> urwid.Text:
     """
-    한 줄 Diff를 '라인 배경 고정' 방식으로 구성.
-    - 구터(기호/라인번호/구분자)부터 코드 토큰까지 동일 배경 적용
-    - 라인 종류(kind)에 따라 토큰 전경색 매핑
-    - 화면 너비 끝까지 동일 배경이 보이도록 오른쪽 filler(공백 채움) 포함
+    터미널 너비를 고려한 정확한 패딩 버전
     """
     bg, fb_bg = _bg_for_kind(kind)
-    fgmap = _FG_MAP[kind]
-
+    fgmap = _FG_MAP.get(kind)
+    
+    if not fgmap:
+        fgmap = _FG_THEMES.get('monokai-ish', _FG_THEMES['solarized-ish'])
 
     sign_char = '+' if kind == 'add' else '-' if kind == 'del' else ' '
     old_s = f"{old_no}" if old_no is not None else ""
     new_s = f"{new_no}" if new_no is not None else ""
 
+    # 구터 텍스트 생성 (길이 계산용)
+    gutter_text = f"{sign_char} {old_s:>{digits_old}} {new_s:>{digits_new}} │ "
+    gutter_len = len(gutter_text)
+    
     parts: List[Tuple[urwid.AttrSpec, str]] = []
+    
+    # 구터 부분 추가
     parts.append((_mk_attr(SIGN_FG[kind], bg, fb_bg), f"{sign_char} "))
     parts.append((_mk_attr(LNO_OLD_FG, bg, fb_bg), f"{old_s:>{digits_old}} "))
     parts.append((_mk_attr(LNO_NEW_FG, bg, fb_bg), f"{new_s:>{digits_new}} "))
-    parts.append((_mk_attr(SEP_FG,      bg, fb_bg), "│ "))
+    parts.append((_mk_attr(SEP_FG, bg, fb_bg), "│ "))
 
-    # 코드 토큰(탭 고정폭, 개행 제거)
+    # 코드 토큰
     safe = code_line.expandtabs(4).replace('\n','').replace('\r','')
-
-    # lexer 준비(없으면 파일 확장자 기준)
+    code_len = len(safe)
+    
     if lexer is None:
         try:
-            # new 파일 기준으로 추정하되, 호출부에서 전달하는 것을 권장
             lexer = TextLexer()
         except Exception:
             lexer = TextLexer()
@@ -786,25 +791,14 @@ def build_diff_line_text(
             continue
         base = _tok_base_for_diff(ttype)
         parts.append((_mk_attr(fgmap.get(base, 'white'), bg, fb_bg), v))
-
-    # 핵심: 내용 텍스트 + 오른쪽 빈칸 채우기(filler)를 조합해 "화면 끝까지" 같은 배경 유지
-    content = urwid.Text(parts, wrap='clip')  # 실제 표시 내용
-    # filler에 동일 배경을 적용 (전경색은 의미 없으므로 'default')
-    fill_attr = _mk_attr('default', bg, fb_bg)
-    right_fill = urwid.AttrMap(urwid.SolidFill(' '), fill_attr)
-
-    # 첫 열은 내용 폭만(pack), 두 번째 열은 남은 폭 전체(weight=1)
-    line = urwid.Columns(
-        [
-            ('pack', content),
-            ('weight', 1, right_fill),
-        ],
-        dividechars=0,
-        box_columns=None,
-        focus_column=None
-    )
-    return line
-
+    
+    # 정확한 패딩 계산
+    content_len = gutter_len + code_len
+    padding_len = max(0, terminal_width - content_len)
+    if padding_len > 0:
+        parts.append((_mk_attr('default', bg, fb_bg), ' ' * padding_len))
+    
+    return urwid.Text(parts, wrap='clip')
 
 def _tok_to_diff_attr(tt) -> str:
     from pygments.token import Keyword, String, Number, Comment, Name, Operator, Punctuation, Text, Whitespace
@@ -2337,6 +2331,11 @@ class CodeDiffer:
                 i += 1
                 continue
 
+            try:
+                cols, rows = shutil.get_terminal_size((80, 24))
+            except:
+                cols = 200  # 기본값
+
             # 라인 방출 헬퍼: 라인 종류(kind)에 따라 '한 줄 전체 배경'으로 렌더
             def emit_kind(kind: str, old_no: Optional[int], new_no: Optional[int], content: str):
                 widgets.append(
@@ -2348,6 +2347,7 @@ class CodeDiffer:
                         digits_old=digits_old,
                         digits_new=digits_new,
                         lexer=lexer,
+                        terminal_width=cols
                     )
                 )
 
