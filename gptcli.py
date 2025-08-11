@@ -798,7 +798,7 @@ def build_diff_line_text(
     if padding_len > 0:
         parts.append((_mk_attr('default', bg, fb_bg), ' ' * padding_len))
     
-    return urwid.Text(parts, wrap='clip')
+    return urwid.Text(parts, wrap='any')
 
 def _tok_to_diff_attr(tt) -> str:
     from pygments.token import Keyword, String, Number, Comment, Name, Operator, Punctuation, Text, Whitespace
@@ -1901,7 +1901,7 @@ class CodeDiffer:
 
         self.list_walker = urwid.SimpleFocusListWalker([])
         self.listbox = urwid.ListBox(self.list_walker)
-        self.preview_text = urwid.Text("", wrap="clip")                         # flow
+        self.preview_text = urwid.Text("", wrap="any")                         # flow
         self.preview_body = urwid.AttrMap(self.preview_text, {None: 'preview'})         # 배경 스타일
         self.preview_filler = urwid.Filler(self.preview_body, valign='top')     # flow → box
         self.preview_adapted = urwid.BoxAdapter(self.preview_filler, 1)         # 고정 높이(초기 1줄)
@@ -2127,6 +2127,7 @@ class CodeDiffer:
 
             # 6) 마크업 적용
             self.preview_text.set_text(markup)
+            #self.preview_text = urwid.Text(markup, wrap='any')  # wrap 옵션 추가
 
             # 7) 높이 조정
             self.preview_adapted.height = visible_lines
