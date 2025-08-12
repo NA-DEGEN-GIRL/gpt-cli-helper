@@ -1165,6 +1165,7 @@ def trim_messages_by_tokens(
         removed = len(messages) - len(trimmed)
         console.print(
             f"[dim]컨텍스트 트리밍: {removed}개 제거 | "
+            f"[dim]최신 메시지: {len(trimmed)}개 사용 | "
             f"사용:{used:,}/{prompt_budget:,} (총 프롬프트 여유:{available_for_prompt:,} | "
             f"ratio:{trim_ratio:.2f})[/dim]"
         )
