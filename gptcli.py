@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import base64
 import difflib
-import itertools
 import json
 import mimetypes
 import os
@@ -249,8 +248,8 @@ client = OpenAI(
 # ─────────────────────────────
 # diff view 전용 문법 하이라이트 유틸
 # ─────────────────────────────
-DIFF_ADD_BG = '#005C40'   # '+' 라인 배경
-DIFF_DEL_BG = '#40002E'   # '-' 라인 배경
+DIFF_ADD_BG = '#00005f'   # '+' 라인 배경
+DIFF_DEL_BG = '#5f0000'   # '-' 라인 배경
 DIFF_CTX_BG = 'black'     # 컨텍스트 라인 배경
 
 # 일부 터미널/드라이버에서 hex가 정밀히 매핑되지 않을 수 있으므로 fallback도 준비
@@ -513,8 +512,8 @@ _FG_THEMES = {
     
     # 기존 테마들도 유지 (호환성)
     'monokai-ish': {
-        'kw':'#62EAFF','str':'#e6db74','num':'#9076FC','com':'#937F56',
-        'doc':'#75715e','name':'white','func':'#8EE52E','cls':'#8EE52E',
+        'kw':'#00ffff','str':'#E6DB74','num':'#9076FC','com':'#937F56',
+        'doc':'#afaf5f','name':'white','func':'#8EE52E','cls':'#8EE52E',
         'op':'#FF4686','punc':'white','text':'light gray',
     },
     
@@ -527,9 +526,9 @@ _FG_THEMES = {
 
 # 각 라인 종류에 대한 테마 선택(초기값)
 _FG_MAP = {
-    'add': _FG_THEMES['monokai-ish'],  # None → 실제 테마로 변경
-    'del': _FG_THEMES['monokai-ish'],  # None → 실제 테마로 변경
-    'ctx': _FG_THEMES['monokai-ish'],  # None → 실제 테마로 변경
+    'add': _FG_THEMES['monokai-ish'],
+    'del': _FG_THEMES['monokai-ish'],
+    'ctx': _FG_THEMES['monokai-ish'],
 }
 
 def set_diff_fg_theme(name_for_add: str, name_for_del: str, name_for_ctx: str):
@@ -812,40 +811,6 @@ def build_diff_line_text(
     
     return urwid.Text(parts, wrap='clip')
 
-def _tok_to_diff_attr(tt) -> str:
-    from pygments.token import Keyword, String, Number, Comment, Name, Operator, Punctuation, Text, Whitespace
-    if tt in Keyword or tt in Keyword.Namespace or tt in Keyword.Declaration:
-        return 'diff_code_kw'
-    if tt in String:
-        return 'diff_code_str'
-    if tt in Number:
-        return 'diff_code_num'
-    if tt in Comment:
-        return 'diff_code_com'
-    if tt in Name.Function:
-        return 'diff_code_func'
-    if tt in Name.Class:
-        return 'diff_code_class'
-    if tt in Name:
-        return 'diff_code_name'
-    if tt in Operator:
-        return 'diff_code_op'
-    if tt in Punctuation:
-        return 'diff_code_punc'
-    if tt in (Text, Whitespace):
-        return 'diff_code_text'
-    return 'diff_code_text'
-
-def syntax_markup_segment(text: str, lexer) -> List:
-    parts: List = []
-    try:
-        text = text.expandtabs(4)
-        for ttype, value in lex_line_no_newlines(lexer, text):
-            parts.append((_tok_to_diff_attr(ttype), value))
-    except Exception:
-        parts.append(('diff_code_text', text))
-    return parts
-
 _lexer_cache: Dict[str, Any] = {}
 
 def _get_lexer_for_path(path: Path) -> Any:
@@ -876,68 +841,6 @@ def lex_line_no_newlines(lexer, text: str):
             if not value:
                 continue
         yield ttype, value
-
-def _tok_to_attr(tt) -> str:
-    from pygments.token import Keyword, String, Number, Comment, Name, Operator, Punctuation, Text, Whitespace
-    if tt in Keyword or tt in Keyword.Namespace or tt in Keyword.Declaration:
-        return 'syn_kw'
-    if tt in String:
-        return 'syn_str'
-    if tt in Number:
-        return 'syn_num'
-    if tt in Comment:
-        return 'syn_com'
-    if tt in Name.Function:
-        return 'syn_func'
-    if tt in Name.Class:
-        return 'syn_class'
-    if tt in Name:
-        return 'syn_name'
-    if tt in Operator:
-        return 'syn_op'
-    if tt in Punctuation:
-        return 'syn_punc'
-    if tt in (Text, Whitespace):
-        return 'syn_text'
-    return 'syn_text'
-
-def build_syntax_markup_for_preview(path: Path, start_line: int, end_line: int) -> List:
-    """
-    path의 [start_line, end_line) 구간을 urwid.Text용 markup으로 변환.
-    줄번호 포함.
-    """
-    try:
-        code = path.read_text(encoding='utf-8', errors='ignore')
-    except Exception as e:
-        return [("syn_com", f"[미리보기 오류: {e}]")]
-
-    lines = code.splitlines()
-    total = len(lines)
-    start = max(0, min(start_line, total))
-    end = max(start, min(end_line, total))
-    digits = max(2, len(str(total)))
-
-    try:
-        lexer = _get_lexer_for_path(path)
-    except Exception:
-        lexer = TextLexer()
-
-    markup: List[Any] = []
-    for idx in range(start, end):
-        lno = f"{idx+1:>{digits}} │ "
-        markup.append(('syn_lno', lno))
-
-        # 탭 고정폭 + 토큰 value의 개행 제거
-        safe_line = lines[idx].expandtabs(4)
-        try:
-            for ttype, value in lex_line_no_newlines(lexer, safe_line):
-                attr = _tok_to_attr(ttype)
-                markup.append((attr, value))
-        except Exception:
-            markup.append(('syn_text', safe_line))
-        markup.append('\n')
-
-    return markup
 
 class TokenEstimator:
     def __init__(self, model: str = "gpt-4"):
@@ -1801,11 +1704,9 @@ def snap_scroll_to_bottom() -> None:
     아주 작은 출력(개행)을 한 번 찍어 즉시 맨 아래로 스냅시킨다.
     """
     try:
-        # 작은 개행 한 번이면 대부분의 터미널에서 즉시 bottom으로 이동한다.
-        # (스크롤백이 위에 고정된 상태에서 다음 출력이 '강제 하단 정렬'을 유도)
-        sys.stdout.write("\n") # 소용없음
-        sys.stdout.flush() # 소용없음
-        console.print() # 소용없음
+        sys.stdout.write("")
+        sys.stdout.flush()
+        #console.print()
     except Exception:
         pass
 
@@ -2585,207 +2486,6 @@ class CodeDiffer:
                         regenerate_diff_view()
 
         self.main_loop.unhandled_input = diff_unhandled
-    
-    def __show_diff_view(self):
-        import re
-        if len(self.selected_for_diff) != 2:
-            return
-
-        item1, item2 = self.selected_for_diff
-        # old/new 결정(응답 순서 기준)
-        if item1.get("source") == "local" or item1.get("msg_id", 0) < item2.get("msg_id", 0):
-            old_item, new_item = item1, item2
-        else:
-            old_item, new_item = item2, item1
-
-        try:
-            old_text = old_item['path'].read_text(encoding='utf-8', errors='ignore')
-            new_text = new_item['path'].read_text(encoding='utf-8', errors='ignore')
-            old_lines = old_text.splitlines()
-            new_lines = new_text.splitlines()
-        except Exception as e:
-            self.footer.original_widget.set_text(f"Error: {e}")
-            return
-
-        diff = list(difflib.unified_diff(
-            old_lines, new_lines,
-            fromfile=f"a/{old_item['path'].name}",
-            tofile=f"b/{new_item['path'].name}",
-            lineterm='',
-            n=3
-        ))
-        if not diff:
-            self.footer.original_widget.set_text("두 파일이 동일합니다.")
-            return
-
-        digits_old = max(2, len(str(len(old_lines))))
-        digits_new = max(2, len(str(len(new_lines))))
-        # 한 가지 폭으로 고정하면 눈이 덜 피곤합니다(신규 기준으로 통일)
-        digits = max(digits_old, digits_new)
-
-        try:
-            lexer = _get_lexer_for_path(new_item['path'])
-        except Exception:
-            lexer = TextLexer()
-
-        widgets: List[urwid.Widget] = []
-        # 상단 파일 헤더(그냥 텍스트 한 줄씩)
-        widgets.append(urwid.Text(('diff_file_old', f"--- a/{old_item['path'].name}"), wrap='clip'))
-        widgets.append(urwid.Text(('diff_file_new', f"+++ b/{new_item['path'].name}"), wrap='clip'))
-        
-        # 가로 스크롤 상태 초기화
-        h_offset_ref = {'value': 0}
-        max_line_len = 0
-        
-        # diff 라인 생성 시 최대 길이 계산
-        for line in diff:
-            if line and not line.startswith('@@'):
-                content = line[1:] if line[0] in '+-' else line
-                max_line_len = max(max_line_len, len(content.expandtabs(4)))
-
-        # 헝크 파서
-        old_ln = None
-        new_ln = None
-        hunk_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
-
-        i = 0
-        while i < len(diff):
-            line = diff[i]
-
-            # 파일 헤더 스킵(이미 수동으로 출력)
-            if line.startswith('---') and i == 0:
-                i += 1; continue
-            if line.startswith('+++') and i == 1:
-                i += 1; continue
-
-            # 헝크 헤더
-            if line.startswith('@@'):
-                m = hunk_re.match(line)
-                if m:
-                    old_ln = int(m.group(1))
-                    new_ln = int(m.group(3))
-                widgets.append(urwid.Text(('diff_hunk', line), wrap='clip'))
-                i += 1
-                continue
-
-            try:
-                cols, rows = shutil.get_terminal_size((80, 24))
-            except:
-                cols = 200  # 기본값
-
-            
-            # 라인 방출 헬퍼: 라인 종류(kind)에 따라 '한 줄 전체 배경'으로 렌더
-            def emit_kind(kind: str, old_no: Optional[int], new_no: Optional[int], content: str):
-                widgets.append(
-                    build_diff_line_text(
-                        kind=kind,
-                        code_line=content,
-                        old_no=old_no,
-                        new_no=new_no,
-                        digits_old=digits_old,
-                        digits_new=digits_new,
-                        lexer=lexer,
-                        h_offset=h_offset_ref['value'],  # 현재 오프셋 적용
-                    )
-                )
-
-
-            # '-' 다음이 '+' 페어: 두 줄 연속
-            if line.startswith('-') and i + 1 < len(diff) and diff[i+1].startswith('+'):
-                old_line = line[1:]
-                new_line = diff[i+1][1:]
-                emit_kind('del', old_ln, None, old_line)
-                emit_kind('add', None, new_ln, new_line)
-                if old_ln is not None: old_ln += 1
-                if new_ln is not None: new_ln += 1
-                i += 2
-                continue
-
-            # 단일 라인
-            if line.startswith('-'):
-                emit_kind('del', old_ln, None, line[1:])
-                if old_ln is not None: old_ln += 1
-            elif line.startswith('+'):
-                emit_kind('add', None, new_ln, line[1:])
-                if new_ln is not None: new_ln += 1
-            elif line.startswith(('---','+++')):
-                widgets.append(urwid.Text(('diff_meta', line), wrap='clip'))
-            else:
-                content = line[1:] if line.startswith(' ') else line
-                emit_kind('ctx', old_ln, new_ln, content)
-                if old_ln is not None: old_ln += 1
-                if new_ln is not None: new_ln += 1
-
-            i += 1
-
-
-        #black_filler = urwid.AttrMap(urwid.Text(''), urwid.AttrSpec('', 'black'))
-        #widgets.append(black_filler)
-
-        diff_walker = urwid.SimpleFocusListWalker(widgets)
-        diff_listbox = DiffListBox(diff_walker) #urwid.ListBox(diff_walker)
-
-        header = urwid.AttrMap(
-            urwid.Text(f"Diff: {old_item['path'].name} → {new_item['path'].name}", wrap='clip'),
-            'header'
-        )
-        diff_footer = urwid.AttrMap(urwid.Text("PgUp/Dn: 스크롤 | Home/End: 처음/끝 | Q: 닫기", wrap='clip'), 'header')
-        diff_frame = urwid.Frame(diff_listbox, header=header, footer=diff_footer)
-
-        # 기존 상태 백업 후 화면 전환
-        self._old_widget = self.main_loop.widget
-        self._old_unhandled_input = self.main_loop.unhandled_input
-        self._old_input_filter = self.main_loop.input_filter
-        self.main_loop.widget = diff_frame
-
-        def update_footer():
-            scroll_info = ""
-            if h_offset_ref['value'] > 0:
-                scroll_info = f" [H:{h_offset_ref['value']}]"
-            if max_line_len > 100:  # 긴 줄이 있으면 표시
-                scroll_info += f" [←→: 가로스크롤]"
-            
-            diff_footer.original_widget.set_text(
-                f"PgUp/Dn: 스크롤 | Home/End: 처음/끝 | ←→: 가로 | Q: 닫기{scroll_info}"
-            )
-
-        # q로 닫기
-        def diff_unhandled(key):
-            if isinstance(key, str):
-                if key.lower() == 'q':
-                    # 원래 상태 복원
-                    self.main_loop.widget = self._old_widget
-                    self.main_loop.unhandled_input = self._old_unhandled_input
-                    self.main_loop.input_filter = self._old_input_filter
-                    try:
-                        self.main_loop.draw_screen()
-                    except Exception:
-                        pass
-                
-                # 가로 스크롤 처리
-                elif key == 'right':
-                    if h_offset_ref['value'] < max_line_len - 80:  # 터미널 너비 고려
-                        h_offset_ref['value'] += 10  # 10자씩 스크롤
-                        # diff 위젯 재생성
-                        regenerate_diff_view()
-                
-                elif key == 'left':
-                    if h_offset_ref['value'] > 0:
-                        h_offset_ref['value'] = max(0, h_offset_ref['value'] - 10)
-                        regenerate_diff_view()
-                
-                elif key == 'home':
-                    h_offset_ref['value'] = 0
-                    regenerate_diff_view()
-
-        def regenerate_diff_view():
-            # 위젯 리스트 재생성 (간단한 방법)
-            # 실제로는 더 효율적인 방법이 있지만 복잡함
-            update_footer()
-            self.main_loop.draw_screen()
-        
-        self.main_loop.unhandled_input = diff_unhandled
-        update_footer()
 
     def start(self):
         self._render_all(keep_focus=False)
@@ -2824,6 +2524,7 @@ def encode_base64(path: Path) -> str:
 
 
 def mask_sensitive(text: str) -> str:
+    # for future work
     for key in SENSITIVE_KEYS:
         pattern = rf"({re.escape(key)}\s*=\s*)(['\"]?).*?\2"
         text = re.sub(pattern, r"\1[REDACTED]", text, flags=re.I)
@@ -2958,22 +2659,6 @@ def save_code_blocks(blocks: Sequence[Tuple[str, str]], current_session_name: st
         p.write_text(code, encoding="utf-8")
         saved.append(p)
     return saved
-
-
-def render_diff(a: str, b: str, lang: str = "text") -> None:
-    diff = list(difflib.unified_diff(a.splitlines(), b.splitlines(), lineterm=""))
-    if not diff:
-        console.print("[green]차이 없음[/green]")
-        return
-    for line in diff:
-        if line.startswith(("-", "+")):
-            color = "#330000" if line.startswith("-") else "#003300"
-            console.print(Syntax(line, lang, background_color=color))
-        elif line.startswith("@@"):
-            console.print(line, style="cyan")
-        else:
-            console.print(line)
-
 
 def display_attachment_tokens(attached_files: List[str], compact_mode: bool = False) -> None:
     """첨부 파일들의 토큰 사용량을 시각적으로 표시"""
@@ -3678,7 +3363,7 @@ COMMANDS = """
 /favs                         → 즐겨찾기 목록
 /edit                         → 외부 편집기로 긴 질문 작성
 /diff_code                    → 코드 블록 비교 뷰어 열기
-/theme                        → 코드 블록 테마 변경
+/theme                        → diff_code 테마 변경
 /reset                        → 세션 리셋 & 자동 백업
 /restore                      → 백업에서 세션 복원
 /show_context                 → 현재 컨텍스트 사용량 확인
@@ -4653,17 +4338,6 @@ def chat_mode(name: str, copy_clip: bool) -> None:
         if attached:
             attached = []
             console.print("[dim]첨부 파일 초기화[/dim]")
-
-
-# ──────────────────────────────────────────────────────
-# 11. 단일 prompt 모드
-# ──────────────────────────────────────────────────────
-def single_prompt(text: str) -> None:
-    temp_session = [{"role": "user", "content": text}]
-    reply = ask_stream(temp_session, "openai/gpt-4o", "general")
-    if reply:
-        console.print(reply)
-
 
 def create_default_ignore_file_if_not_exists():
     """전역 기본 .gptignore 파일이 없으면, 합리적인 기본값으로 생성합니다."""
