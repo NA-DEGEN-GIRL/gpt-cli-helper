@@ -3030,24 +3030,8 @@ class FileSelector:
         ).run() 
         return [str(p) for p in sorted(self.selected) if p.is_file()]
 
-    
-# ──────────────────────────────────────────────────────
-# 8. OpenRouter 호출 (스트리밍)
-# ──────────────────────────────────────────────────────
-def ask_stream(
-    messages: List[Dict[str, Any]],
-    model: str,
-    mode: str,
-    model_context_limit: int,
-    pretty_print: bool = True,
-    current_attached_files: List[str] = None
-) -> Optional[str]:
-    console.print(Syntax(" ", "python", theme="monokai", background_color="#008C45"))
-    console.print(Syntax(" ", "python", theme="monokai", background_color="#F4F5F0"))
-    console.print(Syntax(" ", "python", theme="monokai", background_color="#CD212A"))
 
-    # ... ask_stream 함수 내부 ...
-
+def get_system_prompt_content(mode: str) -> str:
     # 시스템 프롬프트(페르소나)를 더욱 구체적이고 명확하게 수정
     if mode == "dev":
         prompt_content = """
@@ -3118,7 +3102,26 @@ def ask_stream(
 
             당신은 사용자의 든든한 동반자입니다.
         """
+    return prompt_content
 
+    
+# ──────────────────────────────────────────────────────
+# 8. OpenRouter 호출 (스트리밍)
+# ──────────────────────────────────────────────────────
+def ask_stream(
+    messages: List[Dict[str, Any]],
+    model: str,
+    mode: str,
+    model_context_limit: int,
+    pretty_print: bool = True,
+    current_attached_files: List[str] = None
+) -> Optional[str]:
+    console.print(Syntax(" ", "python", theme="monokai", background_color="#008C45"))
+    console.print(Syntax(" ", "python", theme="monokai", background_color="#F4F5F0"))
+    console.print(Syntax(" ", "python", theme="monokai", background_color="#CD212A"))
+
+    prompt_content = get_system_prompt_content(mode)
+    
     system_prompt = {
         "role": "system",
         "content": prompt_content.strip(),
@@ -3587,6 +3590,173 @@ def estimate_message_tokens(messages: List[Dict]) -> int:
                     total += 1000  # 기본값
     return total
 
+def _build_context_report(
+    model_name: str,
+    model_context_limit: int,
+    system_prompt_text: str,
+    messages_to_send: List[Dict[str, Any]],
+    *,
+    reserve_for_completion: int,
+    trim_ratio: float,
+    compact_mode: bool,
+    top_n: int = 5,
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    상세 컨텍스트 보고서 문자열과 원시 통계를 반환.
+    - TokenEstimator + (벤더 오프셋, trim_ratio)와 동일한 로직으로 집계
+    - prompt_budget/used 를 분리 표기
+    """
+    te = token_estimator
+
+    # 벤더 오프셋(트리밍과 동일한 규칙)
+    vendor_offset = 0
+    mname = (model_name or "").lower()
+    for vendor, offset in _VENDOR_SPECIFIC_OFFSET.items():
+        if vendor in mname:
+            vendor_offset = offset
+            break
+
+    # 토큰 집계 유틸(트리밍과 동일한 카운터 사용)
+    def _msg_tokens(msg: Dict[str, Any]) -> int:
+        return _count_message_tokens_with_estimator(msg, te)
+
+    # 시스템/예산 계산
+    sys_tokens = te.count_text_tokens(system_prompt_text or "")
+    available_for_prompt = max(0, model_context_limit - sys_tokens - reserve_for_completion - vendor_offset)
+    prompt_budget = int(available_for_prompt * trim_ratio)
+
+    # 전체 메시지 토큰 합계(추정)
+    per_msg = [(i, msg, _msg_tokens(msg)) for i, msg in enumerate(messages_to_send)]
+    prompt_used = sum(t for _, _, t in per_msg)
+
+    # 항목별(텍스트/이미지/PDF) 세부 집계
+    text_tokens = 0
+    image_tokens = 0
+    pdf_tokens = 0
+    image_count = 0
+    pdf_count = 0
+
+    for _, msg, _t in per_msg:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            text_tokens += te.count_text_tokens(content)
+        elif isinstance(content, list):
+            for part in content:
+                ptype = part.get("type")
+                if ptype == "text":
+                    text_tokens += te.count_text_tokens(part.get("text", ""))
+                elif ptype == "image_url":
+                    image_count += 1
+                    image_url = part.get("image_url", {}) or {}
+                    url = image_url.get("url", "")
+                    detail = image_url.get("detail", "auto")
+                    if isinstance(url, str) and "base64," in url:
+                        try:
+                            b64 = url.split("base64,", 1)[1]
+                            image_tokens += te.estimate_image_tokens(b64, detail=detail)
+                        except Exception:
+                            image_tokens += 1105
+                    else:
+                        image_tokens += 85
+                elif ptype == "file":
+                    pdf_count += 1
+                    file_data = part.get("file", {}) or {}
+                    data_url = file_data.get("file_data", "")
+                    filename = (file_data.get("filename") or "").lower()
+                    if filename.endswith(".pdf") and "base64," in data_url:
+                        try:
+                            b64 = data_url.split("base64,", 1)[1]
+                            pdf_bytes = base64.b64decode(b64)
+                            pdf_tokens += int(len(pdf_bytes) / 1024 * 3)  # 1KB ≈ 3 tokens 근사
+                        except Exception:
+                            pdf_tokens += 1000
+                    else:
+                        pdf_tokens += 500
+
+    # 총합(시스템 포함 X: 시스템은 별도 표기)
+    prompt_total_est = prompt_used
+    total_with_sys_and_reserve = sys_tokens + prompt_total_est + reserve_for_completion + vendor_offset
+
+    # 진행도 바 유틸
+    def _bar(percent: float, width: int = 30, fill_char="█", empty_char="░") -> str:
+        p = max(0.0, min(100.0, percent))
+        filled = int(round(width * p / 100.0))
+        return f"{fill_char * filled}{empty_char * (width - filled)} {p:>5.1f}%"
+
+    # 퍼센트들
+    pct_total = (total_with_sys_and_reserve / model_context_limit) * 100 if model_context_limit else 0
+    pct_prompt_budget = (prompt_used / prompt_budget * 100) if prompt_budget > 0 else 0
+
+    # 상위 N개 메시지(대형) 정렬
+    top = sorted(per_msg, key=lambda x: x[2], reverse=True)[:top_n]
+
+    # 리포트 문자열 구성
+    lines: List[str] = []
+    lines.append("[bold]컨텍스트 세부[/bold]")
+    lines.append("")
+    lines.append(f"모델 한계: {model_context_limit:,}  |  trim_ratio: {trim_ratio:.2f}  |  vendor_offset: {vendor_offset:,}")
+    lines.append(f"시스템 프롬프트: {sys_tokens:,} tokens")
+    lines.append(f"응답 예약: {reserve_for_completion:,} tokens")
+    lines.append("")
+    lines.append("[bold]총합(시스템+프롬프트+예약)[/bold]")
+    lines.append(_bar(pct_total))
+    lines.append(f"합계: {total_with_sys_and_reserve:,} / {model_context_limit:,} tokens")
+    lines.append("")
+    lines.append("[bold]프롬프트 예산 사용(시스템/예약 제외)[/bold]")
+    if prompt_budget > 0:
+        lines.append(_bar(pct_prompt_budget))
+    lines.append(f"프롬프트 사용: {prompt_used:,} / 예산 {prompt_budget:,}  (가용 {available_for_prompt:,})")
+    lines.append("")
+    lines.append("[bold]항목별 세부[/bold]")
+    lines.append(f"- 텍스트: {text_tokens:,} tokens")
+    lines.append(f"- 이미지: {image_tokens:,} tokens  (개수 {image_count})")
+    lines.append(f"- PDF/파일: {pdf_tokens:,} tokens  (개수 {pdf_count})")
+    if compact_mode:
+        lines.append("")
+        lines.append("[green]📦 Compact Mode 활성: 과거 첨부파일이 압축되어 전송량 절감 중[/green]")
+
+    # 상위 N개 무거운 메시지
+    if top:
+        lines.append("")
+        lines.append(f"[bold]대형 메시지 Top {len(top)}[/bold]")
+        for idx, msg, tok in top:
+            role = msg.get("role", "user")
+            # 미리보기 텍스트 생성
+            preview = ""
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                preview = content.strip().replace("\n", " ")
+            elif isinstance(content, list):
+                texts = [p.get("text", "") for p in content if p.get("type") == "text"]
+                preview = (texts[0] if texts else "").strip().replace("\n", " ")
+            if len(preview) > 80:
+                preview = preview[:77] + "..."
+            lines.append(f"- #{idx+1:>3} [{role}] {tok:,} tokens | {preview}")
+
+    report = "\n".join(lines)
+
+    stats = {
+        "model_context_limit": model_context_limit,
+        "sys_tokens": sys_tokens,
+        "reserve_for_completion": reserve_for_completion,
+        "vendor_offset": vendor_offset,
+        "trim_ratio": trim_ratio,
+        "available_for_prompt": available_for_prompt,
+        "prompt_budget": prompt_budget,
+        "prompt_used": prompt_used,
+        "prompt_pct_used": pct_prompt_budget,
+        "total_with_sys_and_reserve": total_with_sys_and_reserve,
+        "total_pct": pct_total,
+        "text_tokens": text_tokens,
+        "image_tokens": image_tokens,
+        "pdf_tokens": pdf_tokens,
+        "image_count": image_count,
+        "pdf_count": pdf_count,
+        "top_messages": [(i, tok) for i, _, tok in top],
+    }
+    return report, stats
+
+
 def chat_mode(name: str, copy_clip: bool) -> None:
     # 1. 초기 모드는 항상 'dev'로 고정
     mode = "dev"
@@ -3776,33 +3946,108 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 console.print(f"첨부파일 압축 모드가 {status}되었습니다.")
                 console.print("[dim]활성화 시: 과거 메시지의 첨부파일이 파일명만 남고 제거됩니다.[/dim]")
                 continue
+            
             elif cmd == "/show_context":
-                # 기존 코드에 usage_history 정보 추가
-                total_tokens = 0
-                image_count = 0
-                
-                # ... (기존 코드)
-                
-                # usage_history 통계 추가
-                if usage_history:
-                    actual_count = sum(1 for u in usage_history if not u.get("estimated"))
-                    estimated_count = sum(1 for u in usage_history if u.get("estimated"))
-                    total_used = sum(u.get("total_tokens", 0) for u in usage_history)
+                # ─────────────────────────────────────────────────────────
+                # 2) /show_context 명령 처리 확장
+                #    사용 예:
+                #/show_context             # 기본 모드
+                #/show_context -v          # verbose(Top N 표시)
+                #/show_context --top 10    # 상위 10개 대형 메시지
+                # ─────────────────────────────────────────────────────────
+                # 옵션 파싱
+                verbose = ("-v" in args) or ("--verbose" in args)
+                try:
+                    if "--top" in args:
+                        k = args.index("--top")
+                        top_n = int(args[k+1]) if k+1 < len(args) else 5
+                    else:
+                        top_n = 10 if verbose else 5
+                except Exception:
+                    top_n = 5
+
+                # 현재 트리밍·전송과 동일한 조건으로 사용(모델/컨텍스트/예약/trim_ratio)
+                if model_context >= 200_000:
+                    reserve_for_completion = 32_000
+                elif model_context >= 128_000:
+                    reserve_for_completion = 16_000
+                else:
+                    reserve_for_completion = 4_096
+
+                trim_ratio = CONTEXT_TRIM_RATIO
+                prompt_content = get_system_prompt_content(mode)
+
+                # ✅ 핵심 수정: compact_mode에 따라 계산할 메시지 결정
+                if compact_mode:
+                    # 압축된 메시지 생성
+                    messages_for_estimation = []
+                    for i, msg in enumerate(messages):
+                        if i == len(messages) - 1:
+                            messages_for_estimation.append(msg)
+                        elif msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                            messages_for_estimation.append(convert_to_placeholder_message(msg))
+                        else:
+                            messages_for_estimation.append(msg)
                     
-                    console.print(Panel.fit(
-                        f"메시지: {len(messages)}개\n"
-                        f"이미지: {image_count}개\n"
-                        f"예상 토큰: {total_tokens:,}\n"
-                        f"모델 한계: {model_context:,}\n"
-                        f"사용률: {(total_tokens/model_context)*100:.1f}%\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"실제 API 호출: {actual_count}회\n"
-                        f"추정 API 호출: {estimated_count}회\n"
-                        f"누적 토큰 사용: {total_used:,}",
-                        title="[cyan]컨텍스"))
+                    # 압축 효과 비교를 위해 원본 메시지로도 통계 계산
+                    original_stats = _build_context_report(
+                        model_name=model,
+                        model_context_limit=model_context,
+                        system_prompt_text=prompt_content.strip(),
+                        messages_to_send=messages,  # 원본 메시지
+                        reserve_for_completion=reserve_for_completion,
+                        trim_ratio=trim_ratio,
+                        compact_mode=False,  # 비교용이므로 False
+                        top_n=0,
+                    )[1]
+                    
+                else:
+                    messages_for_estimation = messages
+                    original_stats = None
+
+                # 최종 리포트 생성
+                report, stats = _build_context_report(
+                    model_name=model,
+                    model_context_limit=model_context,
+                    system_prompt_text=prompt_content.strip(),
+                    messages_to_send=messages_for_estimation,
+                    reserve_for_completion=reserve_for_completion,
+                    trim_ratio=trim_ratio,
+                    compact_mode=compact_mode,
+                    top_n=top_n,
+                )
+                
+                # ✅ 수정: _build_context_report에서 반환된 보고서를 compact 모드에 맞게 재구성
+                report_lines = report.split('\n')
+                
+                if compact_mode and original_stats:
+                    saved_tokens = original_stats["prompt_used"] - stats["prompt_used"]
+                    saved_percent = (saved_tokens / original_stats["prompt_used"] * 100) if original_stats["prompt_used"] > 0 else 0
+                    
+                    compression_info = [
+                        "",
+                        "[bold cyan]📦 Compact Mode 효과[/bold cyan]",
+                        f"원본 프롬프트: {original_stats['prompt_used']:,} 토큰",
+                        f"압축 후 프롬프트: {stats['prompt_used']:,} 토큰 ([green]-{saved_percent:.1f}%[/green])",
+                        f"절약된 토큰: {saved_tokens:,}",
+                    ]
+                    
+                    # '항목별 세부' 섹션 찾아서 그 위에 삽입
+                    try:
+                        insert_pos = report_lines.index("[bold]항목별 세부[/bold]")
+                        report_lines[insert_pos-1:insert_pos-1] = compression_info
+                    except ValueError:
+                        report_lines.extend(compression_info)
+
+                # ... 이하 시각화 출력 코드는 동일 ...
+                console.print(Panel.fit(
+                    "\n".join(report_lines),
+                    title=f"[cyan]컨텍스트 상세 (모델: {model})[/cyan]",
+                    border_style="cyan" if stats["total_pct"] < 70 else ("yellow" if stats["total_pct"] < 90 else "red")
+                ))
                 continue
 
-            if cmd == "/theme":
+            elif cmd == "/theme":
                 # not using now
                 if not args:
                     console.print("[yellow]사용법: /theme <테마이름>[/yellow]")
