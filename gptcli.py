@@ -1792,6 +1792,103 @@ class DiffListBox(urwid.ListBox):
         # 클릭은 무시 (header/footer 깜빡임 방지)
         return True
 
+def build_diff_line_text_with_tokens(
+    kind: str,
+    code_line: str,
+    old_no: Optional[int],
+    new_no: Optional[int],
+    digits_old: int,
+    digits_new: int,
+    line_tokens: Optional[List[Tuple]] = None,  # 사전 렉싱된 토큰
+    h_offset: int = 0,
+    terminal_width: int = 200,
+) -> urwid.Text:
+    """
+    사전 렉싱된 토큰 정보를 활용한 diff 라인 렌더링
+    """
+    bg, fb_bg = _bg_for_kind(kind)
+    fgmap = _FG_MAP.get(kind)
+    
+    if not fgmap:
+        fgmap = _FG_THEMES.get('monokai-ish', _FG_THEMES['solarized-ish'])
+
+    sign_char = '+' if kind == 'add' else '-' if kind == 'del' else ' '
+    old_s = f"{old_no}" if old_no is not None else ""
+    new_s = f"{new_no}" if new_no is not None else ""
+
+    parts: List[Tuple[urwid.AttrSpec, str]] = []
+    
+    # 구터는 항상 표시 (스크롤 영향 없음)
+    parts.append((_mk_attr(SIGN_FG[kind], bg, fb_bg), f"{sign_char} "))
+    parts.append((_mk_attr(LNO_OLD_FG, bg, fb_bg), f"{old_s:>{digits_old}} "))
+    parts.append((_mk_attr(LNO_NEW_FG, bg, fb_bg), f"{new_s:>{digits_new}} "))
+    parts.append((_mk_attr(SEP_FG, bg, fb_bg), "│ "))
+
+    # 코드 부분에 가로 오프셋 적용
+    safe = code_line.expandtabs(4).replace('\n','').replace('\r','')
+    
+    # 오프셋 적용
+    if h_offset > 0:
+        if h_offset < len(safe):
+            safe = safe[h_offset:]
+        else:
+            safe = ""
+    
+    # 스크롤 표시
+    if h_offset > 0 and safe:
+        parts.append((_mk_attr('dark gray', bg, fb_bg), "←"))
+    
+    # ✅ 핵심: 사전 렉싱된 토큰 사용
+    if line_tokens:
+        # 토큰 정보가 있으면 정확한 하이라이팅
+        accumulated_pos = 0
+        for ttype, value in line_tokens:
+            token_start = accumulated_pos
+            token_end = accumulated_pos + len(value)
+            
+            # 오프셋 적용된 가시 영역 체크
+            if token_end > h_offset:
+                if token_start < h_offset:
+                    # 토큰이 잘림
+                    visible_value = value[h_offset - token_start:]
+                else:
+                    # 전체 보임
+                    visible_value = value
+                
+                base = _tok_base_for_diff(ttype)
+                parts.append((_mk_attr(fgmap.get(base, 'white'), bg, fb_bg), visible_value))
+            
+            accumulated_pos = token_end
+    else:
+        # 토큰 정보가 없으면 기존 방식 (줄 단위 렉싱)
+        if safe:
+            try:
+                lexer = TextLexer()
+                for ttype, value in pyg_lex(safe, lexer):
+                    if not value:
+                        continue
+                    v = value.replace('\n','').replace('\r','')
+                    if not v:
+                        continue
+                    base = _tok_base_for_diff(ttype)
+                    parts.append((_mk_attr(fgmap.get(base, 'white'), bg, fb_bg), v))
+            except:
+                # 렉싱 실패 시 일반 텍스트로
+                parts.append((_mk_attr('white', bg, fb_bg), safe))
+    
+    # 오른쪽 스크롤 표시
+    original_len = len(code_line.expandtabs(4))
+    visible_len = len(safe)
+    if h_offset + visible_len < original_len:
+        parts.append((_mk_attr('dark gray', bg, fb_bg), "→"))
+    
+    # 패딩
+    padding = ' ' * 200
+    parts.append((_mk_attr('default', bg, fb_bg), padding))
+    
+    return urwid.Text(parts, wrap='clip')
+
+
 class CodeDiffer:
     def __init__(self, attached_files: List[str], session_name: str, messages: List[Dict]):
         # 입력 데이터
@@ -2260,7 +2357,7 @@ class CodeDiffer:
         else:
             # 기본 처리는 프레임으로
             self.frame.keypress(self.main_loop.screen_size, key)
-
+    
     def _show_diff_view(self):
         import re
         if len(self.selected_for_diff) != 2:
@@ -2282,6 +2379,21 @@ class CodeDiffer:
             self.footer.original_widget.set_text(f"Error: {e}")
             return
 
+        # ✅ 핵심: 전체 파일을 먼저 렉싱하여 토큰 정보 획득
+        try:
+            old_lexer = _get_lexer_for_path(old_item['path'])
+        except Exception:
+            old_lexer = TextLexer()
+        
+        try:
+            new_lexer = _get_lexer_for_path(new_item['path'])
+        except Exception:
+            new_lexer = TextLexer()
+        
+        # 전체 파일 렉싱하여 줄별 토큰 매핑 생성
+        old_line_tokens = lex_file_by_lines(old_item['path'], old_lexer)
+        new_line_tokens = lex_file_by_lines(new_item['path'], new_lexer)
+
         diff = list(difflib.unified_diff(
             old_lines, new_lines,
             fromfile=f"a/{old_item['path'].name}",
@@ -2296,11 +2408,6 @@ class CodeDiffer:
         # 필요한 변수들
         digits_old = max(2, len(str(len(old_lines))))
         digits_new = max(2, len(str(len(new_lines))))
-        
-        try:
-            lexer = _get_lexer_for_path(new_item['path'])
-        except Exception:
-            lexer = TextLexer()
 
         # 가로 스크롤 상태
         h_offset_ref = {'value': 0}
@@ -2312,7 +2419,7 @@ class CodeDiffer:
                 content = line[1:] if line[0] in '+-' else line
                 max_line_len = max(max_line_len, len(content.expandtabs(4)))
 
-        # diff 위젯 생성 함수
+        # diff 위젯 생성 함수 수정
         def generate_diff_widgets(h_offset: int) -> List[urwid.Widget]:
             widgets: List[urwid.Widget] = []
             
@@ -2345,18 +2452,31 @@ class CodeDiffer:
                     i += 1
                     continue
 
-                # 라인 생성 헬퍼
+                # ✅ 수정된 emit_kind: 토큰 정보 활용
                 def emit_kind(kind: str, old_no: Optional[int], new_no: Optional[int], content: str):
+                    # 원본 파일에서 해당 라인의 토큰 정보 가져오기
+                    line_tokens = None
+                    if kind == 'del' and old_no is not None:
+                        # 삭제된 라인은 old 파일의 토큰 정보 사용
+                        line_tokens = old_line_tokens.get(old_no - 1)  # 0-based index
+                    elif kind == 'add' and new_no is not None:
+                        # 추가된 라인은 new 파일의 토큰 정보 사용
+                        line_tokens = new_line_tokens.get(new_no - 1)  # 0-based index
+                    elif kind == 'ctx':
+                        # context 라인은 둘 다 같으므로 new 파일 사용
+                        if new_no is not None:
+                            line_tokens = new_line_tokens.get(new_no - 1)
+                    
                     widgets.append(
-                        build_diff_line_text(
+                        build_diff_line_text_with_tokens(
                             kind=kind,
                             code_line=content,
                             old_no=old_no,
                             new_no=new_no,
                             digits_old=digits_old,
                             digits_new=digits_new,
-                            lexer=lexer,
-                            h_offset=h_offset,  # 현재 오프셋 적용
+                            line_tokens=line_tokens,  # 토큰 정보 전달
+                            h_offset=h_offset,
                         )
                     )
 
@@ -2486,6 +2606,7 @@ class CodeDiffer:
                         regenerate_diff_view()
 
         self.main_loop.unhandled_input = diff_unhandled
+
 
     def start(self):
         self._render_all(keep_focus=False)
