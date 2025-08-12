@@ -14,8 +14,9 @@ import time
 import subprocess
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Set
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Set, Callable
 from typing import Union  # FileSelector 타입 힌트용
+from dataclasses import dataclass
 
 # ── 3rd-party
 import PyPDF2
@@ -66,6 +67,7 @@ rich_theme = Theme({
 # ────────────────────────────────
 CONFIG_DIR = Path.home() / "codes" / "gpt_cli"
 BASE_DIR = Path.cwd()
+REASONING_PANEL_HEIGHT = 10
 
 COMPACT_ATTACHMENTS = True  # 첨부파일 압축 모드 (기본값: 비활성화)
 
@@ -1050,7 +1052,7 @@ def prepare_content_part(path: Path, optimize_images: bool = True) -> Dict[str, 
     # 텍스트 파일
     text = read_plain_file(path)
     tokens = token_estimator.count_text_tokens(text)
-    console.print(f"[dim]텍스트 토큰: {tokens:,}개[/dim]")
+    console.print(f"[dim]텍스트 토큰: {tokens:,}개[/dim]", highlight=False)
     return {
         "type": "text",
         "text": f"\n\n[파일: {path}]\n```\n{text}\n```",
@@ -1117,7 +1119,7 @@ def trim_messages_by_tokens(
 
     sys_tokens = te.count_text_tokens(system_prompt_text or "")
     if sys_tokens >= model_context_limit:
-        console.print("[red]시스템 프롬프트가 모델 컨텍스트 한계를 초과합니다.[/red]")
+        console.print("[red]시스템 프롬프트가 모델 컨텍스트 한계를 초과합니다.[/red]",highlight=False)
         return []
 
     # 벤더별 추가 오프셋
@@ -1126,13 +1128,13 @@ def trim_messages_by_tokens(
     for vendor, offset in _VENDOR_SPECIFIC_OFFSET.items():
         if vendor in clean_model_name:
             vendor_offset = offset
-            console.print(f"[dim]벤더별 오프셋 적용({vendor}): -{vendor_offset:,} 토큰[/dim]")
+            console.print(f"[dim]벤더별 오프셋 적용({vendor}): -{vendor_offset:,} 토큰[/dim]", highlight=False)
             break
 
     available_for_prompt = model_context_limit - sys_tokens - reserve_for_completion - vendor_offset
 
     if available_for_prompt <= 0:
-        console.print("[red]예약 공간과 오프셋만으로 컨텍스트가 가득 찼습니다.[/red]")
+        console.print("[red]예약 공간과 오프셋만으로 컨텍스트가 가득 찼습니다.[/red]",highlight=False)
         return []
 
     # ✅ 이 공간에 안전 비율(trim_ratio) 적용
@@ -1167,13 +1169,15 @@ def trim_messages_by_tokens(
             f"[dim]컨텍스트 트리밍: {removed}개 제거 | "
             f"[dim]최신 메시지: {len(trimmed)}개 사용 | "
             f"사용:{used:,}/{prompt_budget:,} (총 프롬프트 여유:{available_for_prompt:,} | "
-            f"ratio:{trim_ratio:.2f})[/dim]"
+            f"ratio:{trim_ratio:.2f})[/dim]",
+            highlight=False
         )
     else:
         # 트리밍이 발생하지 않아도 로그 출력
         console.print(
             f"[dim]컨텍스트 사용:{used:,}/{prompt_budget:,} "
-            f"(sys:{sys_tokens:,} | reserve:{reserve_for_completion:,} | ratio:{trim_ratio:.2f} | offset:{vendor_offset:,})[/dim]"
+            f"(sys:{sys_tokens:,} | reserve:{reserve_for_completion:,} | ratio:{trim_ratio:.2f} | offset:{vendor_offset:,})[/dim]",
+            highlight=False
         )
         
     return trimmed
@@ -1707,9 +1711,9 @@ def snap_scroll_to_bottom() -> None:
     아주 작은 출력(개행)을 한 번 찍어 즉시 맨 아래로 스냅시킨다.
     """
     try:
-        sys.stdout.write("")
-        sys.stdout.flush()
-        #console.print()
+        #sys.stdout.write("")
+        #sys.stdout.flush()
+        console.print("",end="")
     except Exception:
         pass
 
@@ -3109,6 +3113,75 @@ def get_system_prompt_content(mode: str) -> str:
 # ──────────────────────────────────────────────────────
 # 8. OpenRouter 호출 (스트리밍)
 # ──────────────────────────────────────────────────────
+
+def is_fence_start_line(line: str) -> Optional[Tuple[str, int, str]]:
+    """
+    '완전한 한 줄'(개행 제거)에 대해 '줄 시작 펜스'인지 판정(엄격).
+    - ^[ \t]{0,3} (```... | ~~~...) [ \t]* <info_token>? [ \t]*$
+    - info_token: 언어 토큰 1개만 허용([A-Za-z0-9_+.\-#]+), 그 뒤에는 공백만 허용
+    - 예) '```python'         → 시작으로 인정
+         '```python   '      → 시작으로 인정
+         '```'               → 시작으로 인정
+         '```python 이런식'  → 시작으로 인정하지 않음(설명 문장)
+         '문장 중간 ```python' → 시작으로 인정하지 않음(인라인)
+    반환: (fence_char('`' or '~'), fence_len(>=3), info_token or "")
+    """
+    if line is None:
+        return None
+    s = line.rstrip("\r")
+    # 모든 들여쓰기 허용
+    m = re.match(r'^\s*(?P<fence>(?P<char>`|~){3,})[ \t]*(?P<info>[A-Za-z0-9_+\-.#]*)[ \t]*$', s)
+    if not m:
+        return None
+
+    fence_char = m.group('char')
+    # fence 연속 길이 산출
+    n = 0
+    for ch in s.lstrip():
+        if ch == fence_char:
+            n += 1
+        else:
+            break
+    if n < 3:
+        return None
+
+    info = (m.group('info') or "").strip()
+    # info는 '한 개 토큰'만 허용(공백 불가) → 정규식에서 이미 보장됨
+    return fence_char, n, info
+
+
+
+def is_fence_close_line(line: str, fence_char: str, fence_len: int) -> bool:
+    """
+    '완전한 한 줄'이 닫힘 펜스인지 판정 (들여쓰기 유연).
+    - ^\s* fence_char{fence_len,} [ \t]*$
+    """
+    if line is None:
+        return False
+    s = line.rstrip("\r")
+    pattern = rf'^\s*{re.escape(fence_char)}{{{max(3, fence_len)},}}[ \t]*$'
+    return re.match(pattern, s) is not None
+
+
+def looks_like_start_fragment(fragment: str) -> bool:
+    """
+    개행 없는 조각이 '줄 시작 펜스'처럼 보이면 True (들여쓰기 유연).
+    """
+    if not fragment or "\n" in fragment:
+        return False
+    return re.match(r'^\s*(`{3,}|~{3,})', fragment) is not None
+
+
+def looks_like_close_fragment(fragment: str, fence_char: str, fence_len: int) -> bool:
+    """
+    개행 없는 조각이 '줄 시작 닫힘 펜스'처럼 보이면 True.
+    """
+    if not fragment or "\n" in fragment:
+        return False
+    s = fragment.strip()
+    return re.match(rf'^{re.escape(fence_char)}{{{max(3, fence_len)},}}\s*$', s) is not None
+
+
 def ask_stream(
     messages: List[Dict[str, Any]],
     model: str,
@@ -3117,9 +3190,7 @@ def ask_stream(
     pretty_print: bool = True,
     current_attached_files: List[str] = None
 ) -> Optional[str]:
-    console.print(Syntax(" ", "python", theme="monokai", background_color="#008C45"))
-    console.print(Syntax(" ", "python", theme="monokai", background_color="#F4F5F0"))
-    console.print(Syntax(" ", "python", theme="monokai", background_color="#CD212A"))
+    
 
     prompt_content = get_system_prompt_content(mode)
     
@@ -3236,12 +3307,27 @@ def ask_stream(
                         "timestamp": time.time(),
                         "model": model
                     }
+                
+                # delta 안전 추출
+                delta = None
+                try:
+                    if chunk.choices and chunk.choices[0]:
+                        delta = chunk.choices[0].delta
+                except Exception:
+                    delta = None
 
-                if chunk.choices[0].delta and chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
+                # 1) reasoning 채널 출력(원시)
+                if delta is not None and hasattr(delta, "reasoning") and delta.reasoning:
+                    reasoning_text = delta.reasoning
+                    # 콘솔에 그대로 출력(마크업 끄기)
+                    console.print(reasoning_text, end="", markup=False, highlight=False)
+
+                # 2) 일반 content 출력(원시)
+                if delta is not None and getattr(delta, "content", None):
+                    content = delta.content or ""
                     full_reply += content
-                    # 서식 없이 그대로 출력
-                    console.print(content, end="", markup=False)
+                    console.print(content, end="", markup=False, highlight=False)
+
         except StopIteration:
             pass
         finally:
@@ -3256,13 +3342,39 @@ def ask_stream(
     normal_buffer, last_flush_time = "", time.time()
     reasoning_buffer = ""
     
-    outer_delimiter_len = 0
     nesting_depth = 0
-
-    console.print(f"[bold]{model}:[/bold]")
-    stream_iter = iter(stream)
-
+    outer_fence_char = "`"
+    outer_fence_len = 0
     
+    console.print(Syntax(" ", "python", theme="monokai", background_color="#F4F5F0"))
+    model_name_syntax = Syntax(f"{model}:", "text", theme="monokai", background_color="#CD212A")
+    console.print(model_name_syntax)
+    console.print(Syntax(" ", "python", theme="monokai", background_color="#008C45"))
+    stream_iter = iter(stream)
+    
+
+    def _collapse_live_area(live: Live, clear_height: int = 10) -> None:
+        """
+        reasoning Live를 '완전히 없애고'(빈 줄도 남기지 않고) 화면을 당깁니다.
+        - 순서:
+        1) live.stop(refresh=False)로 마지막 프레임 재출력 없이 정지
+        2) 커서를 패널의 첫 줄로 올림(ESC [ n F)
+        3) 그 위치부터 n줄 삭제(ESC [ n M) → 아래가 위로 당겨짐
+        """
+        con = live.console
+        try:
+            # 마지막 프레임을 다시 그리지 않도록 refresh=False
+            live.stop(refresh=False)
+        except Exception:
+            try:
+                live.stop()
+            except Exception:
+                pass
+
+        # 커서를 n줄 위(해당 라인의 선두)로 이동 후, n줄 삭제
+        # 주: markup=False/ highlight=False로 원시 ANSI를 그대로 출력
+        esc = "\x1b"
+        con.print(f"{esc}[{clear_height}F{esc}[{clear_height}M", end="", markup=False, highlight=False)
 
     try:
         while True:
@@ -3282,10 +3394,12 @@ def ask_stream(
             delta = chunk.choices[0].delta
 
             if hasattr(delta, 'reasoning') and delta.reasoning:
-                if normal_buffer: console.print(normal_buffer, end="", markup=False); normal_buffer = ""
+                if normal_buffer: 
+                    console.print(normal_buffer, end="", markup=False)
+                    normal_buffer = ""
                 
                 # with Live(...) as live: 대신 수동 제어로 변경
-                live = Live(console=console, auto_refresh=True, refresh_per_second=4, transient=True)
+                live = Live(console=console, auto_refresh=True, refresh_per_second=4)
                 live.start()  # Live 객체 수동 시작
                 try:
                     reasoning_buffer = delta.reasoning
@@ -3296,7 +3410,7 @@ def ask_stream(
                             if total_lines > 8:
                                 display_text = f"[dim]... ({total_lines - 8}줄 생략) ...[/dim]\n{display_text}"
                             
-                            panel = Panel(display_text, height=10, title=f"[magenta]🤔 추론 과정 ({total_lines}줄)[/magenta]", border_style="magenta")
+                            panel = Panel(display_text, height=REASONING_PANEL_HEIGHT, title=f"[magenta]🤔 추론 과정 ({total_lines}줄)[/magenta]", border_style="magenta")
                             live.update(panel)
 
                             chunk = next(stream_iter)
@@ -3309,13 +3423,8 @@ def ask_stream(
                             break
                 finally:
                     # 루프가 어떻게 끝나든 반드시 Live를 중지하고 화면을 정리합니다.
-                    live.stop()
+                    _collapse_live_area(live, clear_height=REASONING_PANEL_HEIGHT)
                 
-                # ▼▼▼ 여기가 핵심적인 수정사항입니다 ▼▼▼
-                # Live 객체가 화면에서 사라진 후, 다음 출력이 깨지는 것을 방지하기 위해
-                # 빈 줄을 한 번 출력하여 터미널의 커서 위치와 상태를 동기화합니다.
-                in_code_block = False
-                console.line() 
                 continue
 
             if not (delta and delta.content): 
@@ -3323,95 +3432,106 @@ def ask_stream(
             
             full_reply += delta.content
             buffer += delta.content
-            #full_reply = simple_markdown_to_rich(full_reply)
 
-            while "\n" in buffer: # and not buffer.endswith('\n'):
+            # 코드블록 '시작' 의심 조각이면 개행이 올 때까지 대기(플러시 금지)
+            if not in_code_block and buffer:
+                if looks_like_start_fragment(buffer):
+                    continue 
+                # 백틱으로 끝나는 미완 조각 보호
+                if buffer.endswith('`'):
+                    continue
+
+            while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
 
-                delimiter_info = _parse_backticks(line) # 첫 코드 블락을 왜 인지 못하지?
-                if delimiter_info:
-                    print(delimiter_info)
-
                 if not in_code_block:
-                    if delimiter_info:
-                        if normal_buffer: 
-                            console.print(simple_markdown_to_rich(normal_buffer), end="", markup=True, highlight = False)
+                    # '줄 시작'에만 매치
+                    start = is_fence_start_line(line)
+                    if start:
+                        # 평문 먼저 출력
+                        if normal_buffer:
+                            console.print(normal_buffer, end="", markup=False, highlight=False)
                             normal_buffer = ""
-                        
+                        # 코드 시작
+                        outer_fence_char, outer_fence_len, info = start
+                        language = (info.split() or ["text"])[0] if info else "text"
                         in_code_block = True
-                        outer_delimiter_len, language = delimiter_info
                         nesting_depth = 0
                         code_buffer = ""
-                        
-                        live = Live(console=console, auto_refresh=True, refresh_per_second=4)
-                        live.start() # Live 수동 시작
+
+                        # 코드 Live 시작(현재 환경에서 transient=False가 더 안정이라면 그대로)
+                        live = Live(console=console, auto_refresh=True, refresh_per_second=4, transient=False)
+                        live.start()
                         try:
+                            # 코드 모드 내부 루프
                             while in_code_block:
-                                lines, total_lines = code_buffer.splitlines(), len(code_buffer.splitlines())
-                                panel_height, display_height = 12, 10
-                                
-                                display_text = "\n".join(f"[cyan]{l}[/cyan]" for l in lines[-display_height:])
-                                if total_lines > display_height:
-                                    display_text = f"[dim]... ({total_lines - display_height}줄 생략) ...[/dim]\n{display_text}"
-                                
-                                temp_panel = Panel(display_text, height=panel_height, title=f"[yellow]코드 입력중 ({language}) {total_lines}줄[/yellow]", border_style="dim", highlight=False)
-                                live.update(temp_panel)
-                                
-                                try:
-                                    chunk = next(stream_iter)
-                                    if chunk.choices[0].delta and chunk.choices[0].delta.content:
-                                        full_reply += chunk.choices[0].delta.content
-                                        buffer += chunk.choices[0].delta.content
-                                        
-                                        while "\n" in buffer:
-                                            sub_line, buffer = buffer.split("\n", 1)
-                                            sub_delimiter_info = _parse_backticks(sub_line)
-                                            is_matching = sub_delimiter_info and sub_delimiter_info[0] == outer_delimiter_len
+                                # 패널/뷰 업데이트(기존 로직 그대로)
+                                live.update(Panel(code_buffer[-4000:], title=f"[yellow]코드 ({language})[/yellow]", border_style="dim"))
 
-                                            if is_matching:
-                                                if sub_delimiter_info[1]:
-                                                    nesting_depth += 1
-                                                else:
-                                                    nesting_depth -= 1
+                                # 다음 청크 수신
+                                chunk = next(stream_iter)
+                                delta = chunk.choices[0].delta
+                                if delta and delta.content:
+                                    full_reply += delta.content
+                                    buffer += delta.content
 
-                                            if nesting_depth < 0:
-                                                in_code_block = False
-                                                break
-                                            else:
-                                                code_buffer += sub_line +"\n"
+                                # 개행 단위 처리
+                                while "\n" in buffer:
+                                    sub_line, buffer = buffer.split("\n", 1)
 
-                                        
-                                        if not in_code_block: 
+                                    # 닫힘/시작 판정은 '줄 시작' 전용만 허용
+                                    close_now = is_fence_close_line(sub_line, outer_fence_char, outer_fence_len)
+                                    start_in_code = is_fence_start_line(sub_line)
+
+                                    if start_in_code and start_in_code[0] == outer_fence_char and start_in_code[1] >= outer_fence_len and start_in_code[2]:
+                                        # 내부 시작(정보 문자열 존재) → 중첩 + 원문 보존
+                                        nesting_depth += 1
+                                        code_buffer += sub_line + "\n"
+                                    elif close_now:
+                                        if nesting_depth > 0:
+                                            # 내부 닫힘(원문 보존)
+                                            nesting_depth -= 1
+                                            code_buffer += sub_line + "\n"
+                                        else:
+                                            # 최상위 닫힘 → 종료
+                                            in_code_block = False
                                             break
+                                    else:
+                                        # 일반 코드 라인
+                                        code_buffer += sub_line + "\n"
 
-                                except StopIteration:
-                                    in_code_block = False
-                                    break
-                            
-                            if code_buffer.rstrip():
-                                if language == 'markdown':
-                                    syntax_block = Markdown(code_buffer.rstrip())
-                                else:
-                                    syntax_block = Syntax(code_buffer.rstrip(), language, theme="monokai", line_numbers=True, word_wrap=True)
-                                final_panel = Panel.fit(syntax_block, title=f"[green]코드 ({language})[/green]", border_style="green")
-                                live.update(final_panel)
-                            else:
-                                live.update("")
+                                # 개행 없는 tail이 닫힘 펜스 의심이면 다음 청크까지 대기
+                                if buffer and looks_like_close_fragment(buffer, outer_fence_char, outer_fence_len):
+                                    continue
 
-                        finally:
-                            # 루프가 정상 종료되거나 예외로 중단되더라도 항상 Live를 중지합니다.
-                            # 이렇게 하면 최종 렌더링 결과가 화면에 고정됩니다.
+                        except StopIteration:
+                            # 스트림 종료: 개행 없는 닫힘 펜스 tail 처리
+                            tail = (buffer or "").strip()
+                            if tail and looks_like_close_fragment(tail, outer_fence_char, outer_fence_len) and nesting_depth == 0:
+                                buffer = ""
                             in_code_block = False
+                        finally:
+                            # 코드 블록 최종 스냅샷 출력 및 Live 정리
+                            if code_buffer.rstrip():
+                                try:
+                                    syntax_block = Syntax(code_buffer.rstrip(), language or "text", theme="monokai", line_numbers=True, word_wrap=True)
+                                    live.update(Panel(syntax_block, title=f"[green]코드 ({language})[/green]", border_style="green"))
+                                except Exception:
+                                    console.print(Syntax(code_buffer.rstrip(), "text", theme="monokai", line_numbers=True))
                             live.stop()
-                        
-                        console.line()
+                            #console.line()
                     else:
+                        # 일반 텍스트
                         normal_buffer += line + "\n"
 
-            # 백틱 3개이상 코드 구분을 캐치 못할것을 대비하여 백틱 하나로 끝나면 일단 대기
+                else:
+                    # 방어: 코드 모드인데 여기로 왔다면 내용을 보존
+                    code_buffer += line + "\n"
+
+            # 개행 없는 조각 처리(줄 시작 펜스 의심이면 대기, 아니면 평문으로 플러시)
             if not in_code_block and buffer:
-                if buffer.endswith('`'):
-                    continue # pass가 아니라 continue여야함
+                if looks_like_start_fragment(buffer):
+                    pass  # 대기
                 else:
                     normal_buffer += buffer
                     buffer = ""
@@ -3425,54 +3545,29 @@ def ask_stream(
                     try:
                         display_text = simple_markdown_to_rich(text_to_flush)
                         rich_text = Text.from_markup(display_text, end="")
-                        rich_text.no_wrap = True
-                        console.print(rich_text, highlight=False)
-                        #console.print(display_text, end="", markup=True, highlight=False)
+                        rich_text.no_wrap = False                        
+                        console.print(rich_text, highlight=False, end="")
                     except Exception as e:
-                        # 그냥 있는 그대로 출력하면 문제없이 진행됨
-                        # ▼▼▼ [최종 수정 1] ▼▼▼
-                        # 1. RAW 텍스트로 오류 메시지를 출력합니다.
-                        #console.print(f"\n--- 렌더링 오류 발생 ---", style="bold red")
-                        #console.print(f"오류: {e}", markup=False, highlight=False)
+                        console.print(text_to_flush, markup=False, highlight=False, end="")
                         
-                        # 2. Panel을 제거하고, 오류 원본 텍스트를 markup/highlight 없이 순수하게 출력합니다.
-                        # 이것이 재귀적 렌더링 오류를 막는 가장 안전한 방법입니다.
-                        #console.print("--- 오류 원본 텍스트 ---", style="bold cyan")
-                        console.print(text_to_flush, markup=False, highlight=False)
-                        #console.print("--- 오류 원본 끝 ---", style="bold cyan")
-                        # ▲▲▲ 최종 수정 완료 ▲▲▲
-
                     last_flush_time = current_time
-                #display_text = simple_markdown_to_rich(normal_buffer)
-                #console.print(display_text, end="", markup=True, highlight=False)
-                #console.print(display_text, end="", markup=False, highlight=False)
-                #normal_buffer = ""; last_flush_time = current_time
         
     except StopIteration:
         if normal_buffer:
             try:
                 display_text = simple_markdown_to_rich(normal_buffer)
                 rich_text = Text.from_markup(display_text, end="")
-                rich_text.no_wrap = True
-                console.print(rich_text, highlight=False)
-                #console.print(display_text, end="", markup=True, highlight=False)
+                rich_text.no_wrap = False
+                console.print(rich_text, highlight=False, end="")
             except Exception as e:
-                # 그냥 있는 그대로 출력해버려서 bypass
-                # ▼▼▼ [최종 수정 2] ▼▼▼
-                #console.print(f"\n--- 최종 렌더링 오류 발생 ---", style="bold red")
-                #console.print(f"오류: {e}", markup=False, highlight=False)
-                #console.print("--- 오류 원본 텍스트 ---", style="bold cyan")
-                console.print(normal_buffer, markup=False, highlight=False)
-                #console.print("--- 오류 원본 끝 ---", style="bold cyan")
-                # ▲▲▲ 최종 수정 완료 ▲▲▲
-
+                console.print(normal_buffer, markup=False, highlight=False, end="")
+                
     if in_code_block and code_buffer:
         console.print("\n[yellow]경고: 코드 블록이 제대로 닫히지 않았습니다.[/yellow]")
         console.print(Syntax(code_buffer.rstrip(), language, theme="monokai", line_numbers=True))
 
     console.print()
     return full_reply, usage_info
-
 
 # ──────────────────────────────────────────────────────
 # 9. 멀티라인 Prompt 세션
@@ -3879,7 +3974,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
             conditional_completer.update_attached_file_completer(attached)
             files_info = f"| {len(attached)} files " if attached else ""
             mode_indicator = f"| {mode}"
-            compact_indicator = " 📦" if compact_mode else ""  # 압축 모드 아이콘
+            compact_indicator = " | 📦 " if compact_mode else " "  # 압축 모드 아이콘
             prompt_text = f"[ {current_session_name} {mode_indicator} {files_info}{compact_indicator}] Q>> "
             user_in = session.prompt(prompt_text).strip()
         except (EOFError, KeyboardInterrupt):
@@ -4695,7 +4790,9 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 f"[dim yellow]추정 토큰: "
                 f"입력 {prompt_tokens:,} + "
                 f"출력 {completion_tokens:,} = "
-                f"총 {prompt_tokens + completion_tokens:,}[/dim yellow]"
+                f"총 {prompt_tokens + completion_tokens:,}[/dim yellow]", 
+                highlight = False
+                
             )
 
         
