@@ -3484,7 +3484,6 @@ COMMANDS = """
 /favs                         → 즐겨찾기 목록
 /edit                         → 외부 편집기로 긴 질문 작성
 /diff_code                    → 코드 블록 비교 뷰어 열기
-/theme                        → diff_code 테마 변경
 /reset                        → 세션 리셋 & 자동 백업
 /restore                      → 백업에서 세션 복원
 /show_context                 → 현재 컨텍스트 사용량 확인
@@ -3624,12 +3623,52 @@ def chat_mode(name: str, copy_clip: bool) -> None:
 
     @key_bindings.add("enter", filter=Condition(lambda: session.default_buffer.complete_state is not None))
     def _(event):
+        """자동완성이 활성화된 경우 Enter로 자동완성 적용"""
         complete_state = event.current_buffer.complete_state
         if complete_state:
             if complete_state.current_completion:
                 event.current_buffer.apply_completion(complete_state.current_completion)
             elif complete_state.completions:
                 event.current_buffer.apply_completion(complete_state.completions[0])
+
+    @key_bindings.add("enter", filter=Condition(lambda: 
+        session.default_buffer.text.strip().startswith('/') and 
+        session.default_buffer.complete_state is None
+    ))
+    def _(event):
+        """슬래시 명령어는 Enter로 즉시 실행"""
+        event.current_buffer.validate_and_handle()
+
+    @key_bindings.add("enter", filter=Condition(lambda: 
+        not session.default_buffer.text.strip().startswith('/') and 
+        session.default_buffer.complete_state is None
+    ))
+    def _(event):
+        """일반 텍스트는 Enter로 줄바꿈 (멀티라인 입력)"""
+        event.current_buffer.insert_text('\n')
+
+    # Alt+Enter는 항상 실행 (기존 동작 유지)
+    @key_bindings.add("escape", "enter")  # Alt+Enter
+    def _(event):
+        """Alt+Enter로 강제 실행 (명령어든 텍스트든)"""
+        event.current_buffer.validate_and_handle()
+
+    @key_bindings.add("escape")
+    def _(event):
+        """Esc 키로 입력 버퍼 초기화"""
+        buffer = event.current_buffer
+        # 옵션 1: 즉시 삭제 (간단한 버전)
+        buffer.text = ""
+        buffer.cursor_position = 0
+
+    # ✅ 추가: Ctrl+A로 전체 선택 (선택 후 삭제 가능)
+    @key_bindings.add("c-a")
+    def _(event):
+        """전체 텍스트 선택"""
+        buffer = event.current_buffer
+        buffer.cursor_position = 0
+        buffer.start_selection()
+        buffer.cursor_position = len(buffer.text)
 
     # 최종 PromptSession 설정
     session.history = FileHistory(PROMPT_HISTORY_FILE)
@@ -3747,6 +3786,7 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 continue
 
             if cmd == "/theme":
+                # not using now
                 if not args:
                     console.print("[yellow]사용법: /theme <테마이름>[/yellow]")
                     console.print(f"가능한 테마: {', '.join(sorted(_FG_THEMES.keys()))}")
