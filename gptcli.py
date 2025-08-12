@@ -223,6 +223,11 @@ PALETTE.extend([
 #TRIMMED_HISTORY = 20
 DEFAULT_CONTEXT_LENGTH = 200000
 CONTEXT_TRIM_RATIO = 0.7
+_VENDOR_SPECIFIC_OFFSET = {
+    "anthropic": 4000,  # 2000 → 4000으로 증가
+    "google": 2000,     # 1000 → 2000으로 증가
+    "openai": 1000,     # OpenAI도 약간의 오버헤드가 있음
+}
 console = Console(theme=rich_theme)
 stop_loading = threading.Event()
 
@@ -1051,130 +1056,127 @@ def prepare_content_part(path: Path, optimize_images: bool = True) -> Dict[str, 
         "text": f"\n\n[파일: {path}]\n```\n{text}\n```",
     }
 
-def trim_messages_by_tokens(messages: List[Dict], max_tokens: int) -> List[Dict]:
-    """
-    메시지 리스트를 토큰 제한에 맞게 트리밍합니다.
-    이미지, PDF, 텍스트 각각의 토큰을 정확히 계산합니다.
-    """
-    def calculate_message_tokens(msg: Dict) -> int:
-        """단일 메시지의 토큰 수를 정확히 계산"""
-        total_tokens = 0
-        
-        # role 토큰 (대략 4-5 토큰)
-        total_tokens += 5
-        
-        content = msg.get("content", "")
-        
-        # 1. content가 문자열인 경우 (일반 텍스트 메시지)
-        if isinstance(content, str):
-            total_tokens += token_estimator.count_text_tokens(content)
-        
-        # 2. content가 리스트인 경우 (멀티파트 메시지)
-        elif isinstance(content, list):
-            for part in content:
-                part_type = part.get("type", "")
-                
-                if part_type == "text":
-                    # 텍스트 파트
-                    text_content = part.get("text", "")
-                    total_tokens += token_estimator.count_text_tokens(text_content)
-                
-                elif part_type == "image_url":
-                    # 이미지 파트
-                    image_url = part.get("image_url", {}).get("url", "")
-                    
-                    if "base64," in image_url:
-                        # base64 인코딩된 이미지
-                        try:
-                            # 데이터 URL에서 base64 부분 추출
-                            base64_data = image_url.split("base64,")[1]
-                            
-                            
-                            image_bytes = base64.b64decode(base64_data)
-                            with Image.open(io.BytesIO(image_bytes)) as img:
-                                width, height = img.size
-                                # detail 설정 확인 (기본값: auto)
-                                detail = part.get("image_url", {}).get("detail", "auto")
-                                image_tokens = token_estimator.calculate_image_tokens(width, height, detail)
-                                total_tokens += image_tokens
-                        except Exception as e:
-                            # 이미지 처리 실패 시 base64 길이 기반 추정
-                            console.print(f"[dim yellow]이미지 토큰 계산 실패, 대략적으로 추정: {e}[/dim yellow]")
-                            total_tokens += len(base64_data) // 4
-                    else:
-                        # URL 이미지는 고정 토큰 사용
-                        total_tokens += 85  # low detail 기본값
-                
-                elif part_type == "file":
-                    # PDF 파트
-                    file_data = part.get("file", {})
-                    file_content = file_data.get("file_data", "")
-                    
-                    if "base64," in file_content:
-                        # PDF는 텍스트 추출이 복잡하므로 대략적 추정
-                        base64_data = file_content.split("base64,")[1]
-                        # PDF는 대략 1KB당 3토큰으로 추정
-                        pdf_size_kb = len(base64.b64decode(base64_data)) / 1024
-                        total_tokens += int(pdf_size_kb * 3)
-                    else:
-                        # 기본값
-                        total_tokens += 1000
-        
-        # 메시지 구조 오버헤드 (약 10-20 토큰)
-        total_tokens += 10
-        
-        return total_tokens
-    
-    # 메시지별 토큰 계산 및 캐싱
-    message_tokens = []
-    for msg in messages:
-        tokens = calculate_message_tokens(msg)
-        message_tokens.append((msg, tokens))
-    
-    # 가장 최근 메시지부터 선택하여 토큰 제한 내에 맞추기
-    trimmed_messages = []
-    current_tokens = 0
-    
-    for msg, tokens in reversed(message_tokens):
-        if current_tokens + tokens > max_tokens:
-            break
-        trimmed_messages.append(msg)
-        current_tokens += tokens
+# 2) _count_message_tokens_with_estimator 수정: 벤더별 오프셋 반영
+def _count_message_tokens_with_estimator(msg: Dict[str, Any], te: TokenEstimator) -> int:
+    total = 0
+    # 메시지 구조: Anthropic은 이 부분 오버헤드가 큼
+    # 일단 기존 '6'을 유지하고, 트리밍 시 벤더 오프셋으로 전체 보정
+    total += 6
 
-    if not trimmed_messages and messages:
-        # 가장 최근 메시지의 토큰 수 확인
-        last_msg, last_tokens = message_tokens[-1]
-        
-        console.print(Panel.fit(
-            f"[bold red]⚠️ 컨텍스트 초과 경고[/bold red]\n\n"
-            f"현재 입력이 모델의 토큰 제한을 초과했습니다:\n"
-            f"• 마지막 메시지: {last_tokens:,} 토큰\n"
-            f"• 허용된 제한: {max_tokens:,} 토큰\n"
-            f"• 초과량: {last_tokens - max_tokens:,} 토큰\n\n"
-            f"[yellow]제안사항:[/yellow]\n"
-            f"1. 첨부 파일 크기를 줄이거나 개수를 줄여주세요\n"
-            f"2. 질문을 더 간결하게 작성해주세요\n"
-            f"3. /reset으로 세션을 초기화하고 다시 시도하세요",
-            title="[red]토큰 제한 초과[/red]",
-            border_style="red"
-        ))
-        
-        # 최소한 시스템 메시지라도 보내기 위해 빈 리스트 대신 
-        # 간단한 오류 메시지 반환
-        return [{
-            "role": "user",
-            "content": "이전 컨텍스트가 너무 커서 제거되었습니다. 새로운 대화를 시작합니다."
-        }]
-    
-    # 토큰 사용량 로깅
-    if len(trimmed_messages) < len(messages):
-        removed_count = len(messages) - len(trimmed_messages)
+    # ... 이하 코드는 기존과 동일 ...
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        total += te.count_text_tokens(content)
+        return total
+    if isinstance(content, list):
+        for part in content:
+            ptype = part.get("type")
+            if ptype == "text":
+                total += te.count_text_tokens(part.get("text", ""))
+            elif ptype == "image_url":
+                image_url = part.get("image_url", {})
+                url = image_url.get("url", "")
+                detail = image_url.get("detail", "auto")
+                if isinstance(url, str) and "base64," in url:
+                    try:
+                        b64 = url.split("base64,", 1)[1]
+                        total += token_estimator.estimate_image_tokens(b64, detail=detail)
+                    except Exception:
+                        total += 1105
+                else:
+                    total += 85
+            elif ptype == "file":
+                file_data = part.get("file", {})
+                data_url = file_data.get("file_data", "")
+                filename = file_data.get("filename", "")
+                if isinstance(filename, str) and filename.lower().endswith(".pdf") and "base64," in data_url:
+                    try:
+                        b64 = data_url.split("base64,", 1)[1]
+                        pdf_bytes = base64.b64decode(b64)
+                        total += int(len(pdf_bytes) / 1024 * 3)
+                    except Exception:
+                        total += 1000
+                else:
+                    total += 500
+    return total
+
+# 3) trim_messages_by_tokens 수정: 모델명으로 벤더를 감지하고, 예산 계산식 수정
+def trim_messages_by_tokens(
+    messages: List[Dict[str, Any]],
+    model_name: str, # ⚠️ model_name 파라미터 추가
+    model_context_limit: int,
+    system_prompt_text: str,
+    reserve_for_completion: int = 4096,
+    trim_ratio: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """
+    - 모델명(vendor)에 따라 추가적인 '안전 마진 오프셋'을 적용하여 트리밍
+    """
+    te = token_estimator
+    trim_ratio = float(os.getenv("GPTCLI_TRIM_RATIO", "0.75")) if trim_ratio is None else float(trim_ratio)
+
+    sys_tokens = te.count_text_tokens(system_prompt_text or "")
+    if sys_tokens >= model_context_limit:
+        console.print("[red]시스템 프롬프트가 모델 컨텍스트 한계를 초과합니다.[/red]")
+        return []
+
+    # 벤더별 추가 오프셋
+    vendor_offset = 0
+    clean_model_name = model_name.lower()
+    for vendor, offset in _VENDOR_SPECIFIC_OFFSET.items():
+        if vendor in clean_model_name:
+            vendor_offset = offset
+            console.print(f"[dim]벤더별 오프셋 적용({vendor}): -{vendor_offset:,} 토큰[/dim]")
+            break
+
+    available_for_prompt = model_context_limit - sys_tokens - reserve_for_completion - vendor_offset
+
+    if available_for_prompt <= 0:
+        console.print("[red]예약 공간과 오프셋만으로 컨텍스트가 가득 찼습니다.[/red]")
+        return []
+
+    # ✅ 이 공간에 안전 비율(trim_ratio) 적용
+    prompt_budget = int(available_for_prompt * trim_ratio)
+
+    # 메시지별 토큰 산출
+    per_message = [(m, _count_message_tokens_with_estimator(m, te)) for m in messages]
+
+    trimmed: List[Dict[str, Any]] = []
+    used = 0
+    for m, t in reversed(per_message):
+        if used + t > prompt_budget:
+            break
+        trimmed.append(m)
+        used += t
+    trimmed.reverse()
+
+    if not trimmed and messages:
+        last = messages[-1]
+        if isinstance(last.get("content"), list):
+            text_parts = [p for p in last["content"] if p.get("type") == "text"]
+            minimal = {"role": last.get("role", "user"), "content": text_parts[0]["text"] if text_parts else ""}
+            if _count_message_tokens_with_estimator(minimal, te) <= prompt_budget:
+                console.print("[yellow]최신 메시지의 첨부를 제거하여 텍스트만 전송합니다.[/yellow]")
+                return [minimal]
+        console.print("[red]컨텍스트 한계로 인해 메시지를 전송할 수 없습니다. 입력을 줄여주세요.[/red]")
+        return []
+
+    if len(trimmed) < len(messages):
+        removed = len(messages) - len(trimmed)
         console.print(
-            f"[dim]컨텍스트 트리밍: {removed_count}개 메시지 제거 "
-            f"(사용: {current_tokens:,}/{max_tokens:,} 토큰)[/dim]"
+            f"[dim]컨텍스트 트리밍: {removed}개 제거 | "
+            f"사용:{used:,}/{prompt_budget:,} (총 프롬프트 여유:{available_for_prompt:,} | "
+            f"ratio:{trim_ratio:.2f})[/dim]"
         )
-    
-    return list(reversed(trimmed_messages))
+    else:
+        # 트리밍이 발생하지 않아도 로그 출력
+        console.print(
+            f"[dim]컨텍스트 사용:{used:,}/{prompt_budget:,} "
+            f"(sys:{sys_tokens:,} | reserve:{reserve_for_completion:,} | ratio:{trim_ratio:.2f} | offset:{vendor_offset:,})[/dim]"
+        )
+        
+    return trimmed
+
 
 def get_session_names() -> List[str]:
     """ .gpt_sessions 디렉터리에서 'session_*.json' 파일들을 찾아 세션 이름을 반환합니다. """
@@ -3117,16 +3119,31 @@ def ask_stream(
             당신은 사용자의 든든한 동반자입니다.
         """
 
-    target_max_tokens = int(model_context_limit * CONTEXT_TRIM_RATIO)
-    final_messages = trim_messages_by_tokens(messages, target_max_tokens)
-    
-    if len(final_messages) < len(messages):
-        console.print(f"[dim]컨텍스트 관리: 모델의 토큰 제한({target_max_tokens})에 맞추기 위해 대화 기록을 {len(messages)}개에서 {len(final_messages)}개로 조정했습니다.[/dim]")
-
     system_prompt = {
         "role": "system",
         "content": prompt_content.strip(),
     }
+
+    system_prompt_text = prompt_content.strip()
+
+    # 모델 컨텍스트 크기에 따른 응답 예약 토큰(휴리스틱)
+    if model_context_limit >= 200_000:
+        reserve_for_completion = 32_000
+    elif model_context_limit >= 128_000:
+        reserve_for_completion = 16_000
+    else:
+        reserve_for_completion = 4_096
+
+    # 메시지 트리밍( compact_mode가 있으면 먼저 반영된 messages를 넣으세요 )
+    final_messages = trim_messages_by_tokens(
+        messages=messages,
+        model_name=model,
+        model_context_limit=model_context_limit,
+        system_prompt_text=system_prompt_text,
+        reserve_for_completion=reserve_for_completion,
+        trim_ratio=CONTEXT_TRIM_RATIO,
+    )
+
     def simple_markdown_to_rich(text: str) -> str:
         """
         Placeholder 기법을 '올바른 순서'로 사용하여 모든 충돌을 해결한,
