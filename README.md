@@ -1,10 +1,10 @@
-# GPT-CLI Pro — 터미널 최적화 AI 개발 동반자
+# GPT-CLI Helper — 터미널 최적화 AI 개발 동반자
 
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Status](https://img.shields.io/badge/status-active-success.svg)
 
-**GPT-CLI Pro**는 개발자의 터미널 워크플로우에 완벽하게 통합되도록 설계된, 대화형 AI 클라이언트입니다. OpenRouter의 범용 API를 통해 다양한 최신 언어 모델(Claude 3, GPT-4o, Llama 3 등)을 손쉽게 전환하며 사용할 수 있습니다. 단순히 질문하고 답을 얻는 것을 넘어, 코드 분석, 리뷰, 디버깅, 학습 등 개발의 모든 단계에서 생산성을 극대화하는 데 초점을 맞춘 강력한 기능들을 제공합니다.
+**GPT-CLI Helper**는 개발자의 터미널 워크플로우에 완벽하게 통합되도록 설계된, 대화형 AI 클라이언트입니다. OpenRouter의 범용 API를 통해 다양한 최신 언어 모델(Claude 3, GPT-4o, Llama 3 등)을 손쉽게 전환하며 사용할 수 있습니다. 단순히 질문하고 답을 얻는 것을 넘어, 코드 분석, 리뷰, 디버깅, 학습 등 개발의 모든 단계에서 생산성을 극대화하는 데 초점을 맞춘 강력한 기능들을 제공합니다.
 
 ## Quick Demo (GIF)
 ![GPT-CLI Demo](assets/gptcli-demo.gif)
@@ -41,8 +41,8 @@
 먼저, 이 저장소(repository)를 로컬 컴퓨터에 복제(clone)하거나 다운로드합니다. 이 폴더 위치는 나중에 전역 명령어로 등록할 때 필요합니다.
 
 ```bash
-git clone https://github.com/your-username/gpt-cli-pro.git
-cd gpt-cli-pro
+git clone https://github.com/your-username/gpt-cli-helper.git
+cd gpt-cli-helper
 ```
 
 ### 2단계: 의존성 설치
@@ -84,8 +84,8 @@ OPENROUTER_API_KEY="sk-or-..."_
     `/usr/local/bin`은 대부분의 시스템에서 기본적으로 `PATH`에 포함되어 있습니다.
     ```bash
     # 'gptcli.py'의 전체 경로를 확인하고, 'gptcli'라는 이름의 링크를 생성합니다.
-    # 예: /home/user/myprojects/gpt-cli-pro/gptcli.py
-    sudo ln -s /path/to/your/gpt-cli-pro/gptcli.py /usr/local/bin/gptcli
+    # 예: /home/user/myprojects/gpt-cli-helper/gptcli.py
+    sudo ln -s /path/to/your/gpt-cli-helper/gptcli.py /usr/local/bin/gptcli
     ```
 
 3.  **확인:**
@@ -102,7 +102,7 @@ Windows에서는 시스템 환경 변수 `Path`에 스크립트가 있는 폴더
 1.  **환경 변수 `Path`에 폴더 추가:**
     -   `시스템 속성` -> `고급` -> `환경 변수`로 이동합니다.
     -   `사용자 변수` 또는 `시스템 변수` 목록에서 `Path`를 선택하고 `편집`을 클릭합니다.
-    -   `새로 만들기`를 눌러 `gptcli.py`가 있는 폴더의 전체 경로(예: `C:\Projects\gpt-cli-pro`)를 추가합니다.
+    -   `새로 만들기`를 눌러 `gptcli.py`가 있는 폴더의 전체 경로(예: `C:\Projects\gpt-cli-helper`)를 추가합니다.
 
 2.  **확인:**
     새 명령 프롬프트(cmd)나 PowerShell 창을 열고, 아무 디렉터리에서나 아래 명령어를 입력합니다.
@@ -185,9 +185,9 @@ Windows에서는 시스템 환경 변수 `Path`에 스크립트가 있는 폴더
 <hr>
 <br>
 
-# GPT-CLI Pro — The Developer’s AI CLI (English Version)
+# GPT-CLI Helper — The Developer’s AI CLI (English Version)
 
-**GPT-CLI Pro** is a conversational AI client meticulously engineered to integrate seamlessly into a developer's terminal workflow. Powered by OpenRouter's universal API, it allows you to effortlessly switch between state-of-the-art language models like Claude 3, GPT-4o, and Llama 3. It transcends simple Q&A, offering a suite of powerful features focused on maximizing developer productivity across all stages of development—from code analysis and review to debugging and learning.
+**GPT-CLI Helper** is a conversational AI client meticulously engineered to integrate seamlessly into a developer's terminal workflow. Powered by OpenRouter's universal API, it allows you to effortlessly switch between state-of-the-art language models like Claude 3, GPT-4o, and Llama 3. It transcends simple Q&A, offering a suite of powerful features focused on maximizing developer productivity across all stages of development—from code analysis and review to debugging and learning.
 
 ---
 
@@ -220,8 +220,8 @@ Windows에서는 시스템 환경 변수 `Path`에 스크립트가 있는 폴더
 ### Step 1: Clone the Repository
 First, clone or download this repository to your local machine. You will need this path to register it as a global command.
 ```bash
-git clone https://github.com/your-username/gpt-cli-pro.git
-cd gpt-cli-pro
+git clone https://github.com/your-username/gpt-cli-helper.git
+cd gpt-cli-helper
 ```
 
 ### Step 2: Install Dependencies
@@ -261,8 +261,8 @@ The recommended method is to create a symbolic link in a directory that is in yo
     `/usr/local/bin` is included in the `PATH` on most systems by default.
     ```bash
     # Create a link named 'gptcli' pointing to the full path of your script.
-    # Example path: /home/user/projects/gpt-cli-pro/gptcli.py
-    sudo ln -s /path/to/your/gpt-cli-pro/gptcli.py /usr/local/bin/gptcli
+    # Example path: /home/user/projects/gpt-cli-helper/gptcli.py
+    sudo ln -s /path/to/your/gpt-cli-helper/gptcli.py /usr/local/bin/gptcli
     ```
 
 3.  **Verify:**
@@ -279,7 +279,7 @@ The standard method is to add the script's folder to the system's `Path` environ
 1.  **Add Folder to Path:**
     -   Go to `System Properties` -> `Advanced` -> `Environment Variables`.
     -   Under `System variables` or `User variables`, find `Path`, select it, and click `Edit`.
-    -   Click `New` and add the full path to the folder containing `gptcli.py` (e.g., `C:\Projects\gpt-cli-pro`).
+    -   Click `New` and add the full path to the folder containing `gptcli.py` (e.g., `C:\Projects\gpt-cli-helper`).
 
 2.  **Verify:**
     Open a new Command Prompt or PowerShell window and run the following command from any directory:
