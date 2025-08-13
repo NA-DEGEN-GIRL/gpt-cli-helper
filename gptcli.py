@@ -1927,8 +1927,11 @@ class CodeDiffer:
 
         self._visible_preview_lines: Optional[int] = None  # 동적 가시 줄수 캐시
         self.main_pile = urwid.Pile([self.listbox])
-        footer_text = "↑/↓:이동 | Enter:확장/프리뷰 | Space:선택 | D:Diff | Q:종료 | PgUp/Dn:스크롤"
-        self.footer = urwid.AttrMap(urwid.Text(footer_text), 'header')
+        
+        self.default_footer_text = "↑/↓:이동 | Enter:확장/프리뷰 | Space:선택 | D:Diff | Q:종료 | PgUp/Dn:스크롤"
+        self.footer = urwid.AttrMap(urwid.Text(self.default_footer_text), 'header')
+        self.footer_timer: Optional[threading.Timer] = None # 활성 타이머 추적
+
         self.frame = urwid.Frame(self.main_pile, footer=self.footer)
         self.main_loop: Optional[urwid.MainLoop] = None
 
@@ -1998,19 +2001,42 @@ class CodeDiffer:
             pass
         except IOError:
             pass
+    # 임시 메시지를 표시하고 원래대로 복원하는 헬퍼 메서드
+    def _show_temporary_footer(self, message: str, duration: float = 2.0):
+        # 기존 타이머가 있으면 제거
+        if self.footer_timer is not None:
+            self.main_loop.remove_alarm(self.footer_timer)
+            self.footer_timer = None
+
+        # 새 메시지 표시
+        self.footer.original_widget.set_text(message)
+        # draw_screen()은 set_alarm_in 콜백에서 호출되므로 여기서 필요 없음
+        
+        # 지정된 시간 후에 원래 푸터로 복원하는 알람 설정
+        self.footer_timer = self.main_loop.set_alarm_in(
+            sec=duration,
+            callback=self._restore_default_footer
+        )
+
+    # 기본 푸터 메시지로 복원하는 메서드
+    def _restore_default_footer(self, loop, user_data=None):
+        self.footer.original_widget.set_text(self.default_footer_text)
+        # 알람 ID 정리
+        self.footer_timer = None
+        # 화면 갱신은 루프가 자동으로 처리하므로 draw_screen() 호출 불필요
 
     def handle_selection(self, item):
         is_in_list = any(s['id'] == item['id'] for s in self.selected_for_diff)
         if not is_in_list:
             if len(self.selected_for_diff) >= 2:
-                self.footer.original_widget.set_text("[!] 2개 이상 선택할 수 없습니다.")
+                self._show_temporary_footer("[!] 2개 이상 선택할 수 없습니다.")
                 return
             if item.get('source') == 'local':
                 self.selected_for_diff = [s for s in self.selected_for_diff if s.get('source') != 'local']
             self.selected_for_diff.append(item)
         else:
             self.selected_for_diff = [s for s in self.selected_for_diff if s['id'] != item['id']]
-        self.footer.original_widget.set_text(f" {len(self.selected_for_diff)}/2 선택됨. 'd' 키를 눌러 diff를 실행하세요.")
+        self._show_temporary_footer(f" {len(self.selected_for_diff)}/2 선택됨. 'd' 키를 눌러 diff를 실행하세요.")
 
     def _scan_response_files(self) -> Dict[int, List[Path]]:
         if not CODE_OUTPUT_DIR.is_dir(): return {}
@@ -2361,9 +2387,8 @@ class CodeDiffer:
             if len(self.selected_for_diff) == 2:
                 self._show_diff_view()
             else:
-                self.footer.original_widget.set_text(
-                    f"[!] 2개 항목을 선택해야 diff가 가능합니다. (현재 {len(self.selected_for_diff)}개 선택됨)"
-                )
+                message = f"[!] 2개 항목을 선택해야 diff가 가능합니다. (현재 {len(self.selected_for_diff)}개 선택됨)"
+                self._show_temporary_footer(message)
         else:
             # 기본 처리는 프레임으로
             self.frame.keypress(self.main_loop.screen_size, key)
