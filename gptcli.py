@@ -3543,24 +3543,29 @@ def ask_stream(
                                 lines = code_buffer.splitlines()
                                 total_lines = len(lines)
                                 
-                                # 패널 높이에서 제목/테두리 여유분(2)을 뺀 실제 내용 높이
                                 display_height = CODE_PREVIEW_PANEL_HEIGHT - 2
                                 
-                                # 표시할 내용 생성
                                 display_code = "\n".join(lines[-display_height:])
                                 if total_lines > display_height:
                                     display_code = f"[dim]... ({total_lines - display_height}줄 생략) ...[/dim]\n{display_code}"
                                 
-                                # Syntax 객체로 감싸서 문법 하이라이팅 적용
                                 try:
                                     live_syntax = Syntax(display_code, language, theme="monokai", background_color="#272822")
                                 except Exception:
-                                    # lexer 로드 실패 시 평문으로
                                     live_syntax = Text(display_code)
+
+                                # ✅ 핵심 수정: 코드 길이에 따라 동적으로 패널 높이 결정
+                                # - 내용의 실제 줄 수 (생략 안내 포함하면 +1)
+                                content_actual_lines = len(display_code.splitlines())
+                                
+                                # - 패널 높이는 내용의 실제 줄 수와 최대 높이 중 작은 값으로 설정
+                                #   (최소 1, 테두리/제목 여유분 +2)
+                                panel_height = min(CODE_PREVIEW_PANEL_HEIGHT, content_actual_lines + 2)
+                                panel_height = max(1, panel_height) # 최소 1줄 보장
 
                                 temp_panel = Panel(
                                     live_syntax,
-                                    height=CODE_PREVIEW_PANEL_HEIGHT, # ✅ 고정 높이 적용
+                                    height=panel_height,  # ✅ 동적으로 계산된 높이 적용
                                     title=f"[yellow]코드 입력중 ({language}) | {total_lines} 줄[/yellow]",
                                     border_style="dim"
                                 )
