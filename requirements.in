@@ -1,13 +1,12 @@
-# requirements.txt
 openai
-python-dotenv
 rich
 urwid
 prompt-toolkit
 pyperclip
 pathspec
-requests
-Pillow
 tiktoken
-PyPDF2
+pypdf2
+pillow
+requests
 pygments
+python-dotenv

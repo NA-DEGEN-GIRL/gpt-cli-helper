@@ -47,7 +47,9 @@ pydantic==2.11.3
 pydantic-core==2.33.1
     # via pydantic
 pygments==2.19.1
-    # via rich
+    # via
+    #   -r requirements.in
+    #   rich
 pypdf2==3.0.1
     # via -r requirements.in
 pyperclip==1.9.0

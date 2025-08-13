@@ -3972,7 +3972,7 @@ def _build_context_report(
     return report, stats
 
 
-def chat_mode(name: str, copy_clip: bool) -> None:
+def chat_mode(name: str) -> None:
     # 1. 초기 모드는 항상 'dev'로 고정
     mode = "dev"
     current_session_name = name
@@ -4998,13 +4998,6 @@ def chat_mode(name: str, copy_clip: bool) -> None:
             #for lang, code in code_blocks:
             #    console.print(Syntax(code, lang or "text"))
 
-        if copy_clip:
-            try:
-                pyperclip.copy(reply)
-                console.print("[green]클립보드 복사[/green]")
-            except pyperclip.PyperclipException:
-                console.print("[yellow]클립보드 실패[/yellow]")
-
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         safe_session_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
         md_filename = f"{safe_session_name}_{timestamp}_{len(messages)//2}.md"
@@ -5073,35 +5066,7 @@ gpt_markdowns/
 # main
 # ────────────────────────────────
 def main() -> None:
-    ap = argparse.ArgumentParser(
-        description="터미널에서 AI와 상호작용하는 CLI 도구",
-        formatter_class=argparse.RawTextHelpFormatter
-    )
-    ap.add_argument("prompt", nargs="?", default=None, help="단일 질문을 입력하고 바로 답변을 받습니다.")
-    ap.add_argument("-s", "--session", default="default", help="대화형 모드에서 사용할 세션 이름 (기본값: default)")
-    ap.add_argument("--copy", action="store_true", help="대화형 모드에서 AI의 응답을 클립보드로 복사합니다.")
-    ap.add_argument("--model", default="openai/gpt-4o", help="단일 프롬프트 모드에서 사용할 모델 (기본값: openai/gpt-4o)")
-    args = ap.parse_args()
-
-    # 인자로 프롬프트가 주어진 경우 -> 단일 실행 모드
-    if args.prompt:
-        console.print(f"[dim]모델: {args.model}...[/dim]")
-        # 메시지 객체 생성
-        messages = [{"role": "user", "content": args.prompt}]
-        
-        # 스트리밍 호출 및 답변 출력
-        reply = ask_stream(messages, args.model, "general", pretty_print=True)
-        
-        # 답변을 파일로 저장 (선택적)
-        if reply:
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            MD_OUTPUT_DIR.joinpath(f"single_prompt_{timestamp}.md").write_text(reply, encoding="utf-8")
-        
-        sys.exit(0) # 실행 후 즉시 종료
-
-    # 인자로 프롬프트가 없는 경우 -> 대화형 채팅 모드
-    else:
-        chat_mode(args.session, args.copy)
+    chat_mode("default")
 
 if __name__ == "__main__":
     

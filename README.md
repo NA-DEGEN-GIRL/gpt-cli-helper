@@ -1,249 +1,348 @@
-# GPT-CLI Pro (gptcli.py) — 터미널 최적화 AI 동반자
+# GPT-CLI Pro — 터미널 최적화 AI 개발 동반자
 
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Status](https://img.shields.io/badge/status-active-success.svg)
 
-GPT-CLI Pro는 OpenRouter(=OpenAI 호환 Chat Completions) 위에서 동작하는 고급 터미널 AI 클라이언트입니다. 실시간 스트리밍(추론·코드 프리뷰), 중첩 코드블록 파서, 파일/모델 선택 TUI, 코드 Diff 뷰, 토큰·컨텍스트 리포트, 세션/히스토리/즐겨찾기까지 “개발자 관점”에서 필요한 기능을 한 데 통합했습니다.
-
-- OpenRouter를 통해 Claude 3.x, GPT-4o, Llama 3 등 다양한 모델을 한 API 키로 전환/호출
-- 실시간 스트리밍: 추론(Reasoning) Live, 코드 Live(동적 높이→최대 높이 캡)
-- 중첩 코드블록·들여쓰기·인라인 오탐 방지까지 고려한 라인 기반 펜스 파서(```/~~~)
-- 파일 선택/모델 선택/모델 검색 등 urwid 기반 TUI
-- 전/후 응답 코드 Diff(문맥 줄수 ±, 전체 보기 토글, 가로 스크롤)
-- .gptignore_default + .gptignore 병합 규칙, Compact 모드로 토큰 절감
-- /copy: 클립보드 복사(pyclipboard) + SSH 환경 안전 대안(원시 코드 재출력)
+**GPT-CLI Pro**는 개발자의 터미널 워크플로우에 완벽하게 통합되도록 설계된, 대화형 AI 클라이언트입니다. OpenRouter의 범용 API를 통해 다양한 최신 언어 모델(Claude 3, GPT-4o, Llama 3 등)을 손쉽게 전환하며 사용할 수 있습니다. 단순히 질문하고 답을 얻는 것을 넘어, 코드 분석, 리뷰, 디버깅, 학습 등 개발의 모든 단계에서 생산성을 극대화하는 데 초점을 맞춘 강력한 기능들을 제공합니다.
 
 ---
 
 ## ✨ 핵심 기능
 
-### 1) 스트리밍 출력(Pretty/Rich, Raw)
-- Pretty 모드: Rich 기반 실시간 렌더. 
-  - 추론 Live(높이 REASONING_PANEL_HEIGHT=10)
-  - 코드 Live(동적→최대 CODE_PREVIEW_PANEL_HEIGHT=15, 초과 시 “N줄 생략” 안내)
-  - Markdown 인라인 강조를 안전 처리(simple_markdown_to_rich)
-- Raw 모드: 응답 청크를 그대로 출력. reasoning 채널이 오면 함께 출력됨.
-
-참고: Chat Completions API 인터페이스는 OpenAI 호환이 널리 쓰이는 표준입니다. 유사한 페이로드/스트리밍 패턴은 다른 공급자 문서에서도 확인할 수 있습니다([forefront.ai](https://docs.forefront.ai/api-reference/chat), [cohere.com](https://docs.cohere.com/v2/reference/chat-v1)).
-
-### 2) 견고한 코드블록 파서
-- 줄-시작(왼쪽 공백 허용) + 3개 이상 ``` 또는 ~~~ 만 “시작”으로 인정
-- info 토큰(언어)은 0~1개만 허용, 언어 뒤 설명 텍스트가 오면 “시작”으로 보지 않음
-- 인라인 ```…``` 오탐 방지
-- 개행 없는 조각(fragment) 보호(시작/닫힘 의심 시 대기)
-- 닫힘 펜스 tail(개행 없이 끝) 처리
-- 중첩 fence 깊이 관리(nesting_depth), fence 문자 동일·길이 조건 준수
-
-메시지/컨텐츠 블록 개념은 여러 프레임워크에서 유사하게 정의됩니다([python.langchain.com](https://python.langchain.com/api_reference/core/messages.html)).
-
-### 3) 첨부/멀티모달
-- /all_files TUI(urwid) + .gptignore_default + .gptignore 병합 규칙
-- 이미지(.png/.jpg 등): data URL로 전송, 토큰 추정(자동 리사이즈/타일링 근사)
-- PDF: 파일 파트로 전송(모델 지원 한정). 토큰 대략 근사(PDF 텍스트 추출 시 정확도 향상)
-
-### 4) 컨텍스트 관리/절감(Compact)
-- Trim: 모델 컨텍스트·시스템 프롬프트·벤더 오프셋·예약분 고려
-- Compact 모드(기본 on): 과거 유저 메시지의 첨부를 플레이스홀더로 축약
-- /show_context: 예산/사용/항목별(텍스트·이미지·PDF) 분해, 상위 N 무거운 메시지 표시
-
-스트리밍/요청 모델 패턴은 범용적이며, 다른 SDK/프레임워크의 스트림 패턴과도 유사합니다([ai.pydantic.dev](https://ai.pydantic.dev/api/models/base/)).
-
-### 5) Diff 뷰(urwid)
-- unified_diff 기반, 문맥 줄수 n(±/F 키로 확장/축소·전체 보기 토글)
-- 수평 스크롤(←→/Shift로 가속), 줄 번호/표식/구분자
-- Pygments 사전 렉싱으로 줄 단위 정확 하이라이트(멀티라인 docstring 처리)
-- 색상 팔레트: 16/256 환경 고려(HEX → 안전 색 강등/팔레트 표준화 옵션 제공)
-
-### 6) 모델 선택/검색(TUI)
-- /select_model: ai_models.txt 기반 리스트에서 선택
-- /search_models: OpenRouter 모델 API 검색 후 선택 항목 저장
-
-### 7) 세션/저장/복원
-- .gpt_sessions/session_<name>.json: 메시지/모델/컨텍스트/usage 누적
-- 마지막 응답 .md 저장(gpt_markdowns/), 코드블록 자동 파일 저장(gpt_codes/)
-- /reset: 세션 백업+초기화, /restore: 백업에서 복원(코드 파일 포함)
-
-### 8) /copy (클립보드) + 안전 대안
-- `/copy <번호>`: 해당 코드블록을 pyperclip.copy()
-- SSH/헤드리스 환경에서 실패 시(예: X11 미설정) → **원시 코드 그대로 재출력**(패딩/패널 없이), 사용자가 드래그·복사 가능
-- Git Bash는 X 서버 내장 X, WSL2(WSLg)는 내장 X 서버가 있어 성공 확률 높음
+-   **지능형 스트리밍 출력**: Rich 라이브러리 기반의 미려한 UI로 AI의 응답을 실시간 렌더링합니다.
+    -   **추론(Reasoning) Live**: 일부 모델이 지원하는 "생각 과정"을 별도의 고정 높이 패널에 표시하여, 답변이 생성되는 과정을 투명하게 보여줍니다.
+    -   **코드(Code) Live**: 코드 블록은 내용 길이에 따라 패널 높이가 동적으로 조절되며, 설정된 최대 높이를 넘어서면 "...N줄 생략..." 안내와 함께 스크롤 없이도 핵심 내용을 파악할 수 있습니다.
+-   **견고한 코드블록 파서**: LLM이 생성하는 다양한 형식의 코드 블록을 정확하게 인식합니다.
+    -   들여쓰기가 깊거나(`- `` `), ` `나 `~`를 사용하는 펜스를 모두 지원합니다.
+    -   "이것은 ```python 예시입니다"와 같은 문장 속 삼중 백틱(인라인)을 코드로 오인하지 않습니다.
+    -   코드 블록 내부에 다른 코드 블록이 중첩된 경우에도 깊이를 추적하여 정확히 파싱합니다.
+-   **강력한 파일 첨부 및 관리**:
+    -   `.gptignore` 규칙을 존중하는 TUI 파일 선택기(`/all_files`)로 프로젝트 컨텍스트를 안전하고 빠르게 추가합니다.
+    -   이미지(.png, .jpg), PDF, 소스 코드 등 다양한 파일을 첨부할 수 있습니다.
+-   **TUI 기반 인터페이스**:
+    -   **Diff 뷰 (`/diff_code`)**: 두 코드 블록(예: 수정 전/후)을 나란히 비교합니다. 문맥 줄 수를 동적으로 조절하고(+/-), 전체 파일을 보거나(f), 가로로 긴 코드를 스크롤(←/→)하며 리뷰할 수 있습니다. Pygments 기반의 정확한 문법 하이라이팅을 지원합니다.
+    -   **모델 선택 및 검색 (`/select_model`, `/search_models`)**: `ai_models.txt` 파일을 기반으로 모델을 쉽게 전환하거나, OpenRouter에서 새로운 모델을 검색하여 목록에 추가할 수 있습니다.
+-   **효율적인 컨텍스트 관리**:
+    -   **Compact 모드**: 긴 대화에서 과거 메시지의 첨부 파일을 간단한 플레이스홀더(`[첨부: 파일명]`)로 압축하여, 토큰 사용량을 크게 절감합니다.
+    -   **컨텍스트 리포트 (`/show_context`)**: 현재 대화의 토큰 사용량을 모델 한계, 시스템 프롬프트, 예약 공간 등과 비교하여 시각적으로 보여줍니다.
+-   **안전한 클립보드 복사 (`/copy`)**:
+    -   `/copy <번호>` 명령어로 답변의 코드 블록을 즉시 복사합니다.
+    -   SSH 원격 접속 환경처럼 클립보드 접근이 실패할 경우, 코드를 터미널에 **순수 텍스트로 다시 출력**해 사용자가 직접 드래그하여 복사할 수 있도록 하는 안전장치(Fallback)가 내장되어 있습니다.
 
 ---
 
-## 🚀 설치
+## 🚀 설치 및 설정
 
-### 1) Python/패키지
-```text
-# requirements.txt
-openai
-python-dotenv
-rich
-urwid
-prompt-toolkit
-pyperclip
-pathspec
-tiktoken
-PyPDF2
-Pillow
-requests
-pygments
+### 1단계: 소스 코드 다운로드
+먼저, 이 저장소(repository)를 로컬 컴퓨터에 복제(clone)하거나 다운로드합니다. 이 폴더 위치는 나중에 전역 명령어로 등록할 때 필요합니다.
+
+```bash
+git clone https://github.com/your-username/gpt-cli-pro.git
+cd gpt-cli-pro
 ```
+
+### 2단계: 의존성 설치
+`gptcli`는 여러 파이썬 라이브러리를 사용합니다. 아래 명령어로 한 번에 설치할 수 있습니다.
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2) API 키(.env)
+### 3단계: API 키 설정
+프로젝트 루트 디렉터리에 `.env` 파일을 생성하고 OpenRouter API 키를 추가합니다. 키는 [OpenRouter 대시보드](https://openrouter.ai/keys)에서 발급받을 수 있습니다.
+
 ```env
-OPENROUTER_API_KEY="sk-or-..."
+OPENROUTER_API_KEY="sk-or-..."_
 ```
 
-### 3) 전역 설정/디렉터리
-- 기본 전역 디렉터리: `~/codes/gpt_cli`
-- 최초 실행 시 자동 생성:
-  - `ai_models.txt` (모델 목록)
-  - `.gptignore_default` (전역 무시 규칙)
+### 4단계: 전역 설정 디렉터리
+`gptcli`는 사용자의 홈 디렉터리 아래에 `~/.config/gptcli`를 설정 폴더로 사용합니다. 최초 실행 시 아래 파일들이 자동으로 생성됩니다.
+-   `~/.config/gptcli/ai_models.txt`: 사용 가능한 AI 모델 목록.
+-   `~/.config/gptcli/.gptignore_default`: 모든 프로젝트에 공통으로 적용될 파일/디렉터리 무시 규칙.
 
 ---
 
-## 💡 사용법
+## ⚙️ 전역 명령어로 사용하기 (어디서든 `gptcli` 실행)
 
-### 대화형 모드
-```bash
-gptcli
-```
+이 스크립트를 매번 `python gptcli.py`로 실행하는 것은 불편합니다. 터미널의 어떤 위치에서든 `gptcli`라는 짧은 명령어로 실행할 수 있도록 설정하세요.
 
-### 단일 프롬프트
-```bash
-gptcli "파이썬에서 set으로 중복 제거 예시" --model openai/gpt-4o
-```
+### Linux & macOS
 
-### 주요 명령어(대화 중)
-| 명령 | 설명 |
+가장 권장되는 방법은 `PATH`에 포함된 디렉터리에 심볼릭 링크를 만드는 것입니다.
+
+1.  **실행 권한 부여:**
+    `gptcli.py` 파일에 실행 권한을 줍니다.
+    ```bash
+    chmod +x gptcli.py
+    ```
+
+2.  **심볼릭 링크 생성:**
+    `/usr/local/bin`은 대부분의 시스템에서 기본적으로 `PATH`에 포함되어 있습니다.
+    ```bash
+    # 'gptcli.py'의 전체 경로를 확인하고, 'gptcli'라는 이름의 링크를 생성합니다.
+    # 예: /home/user/myprojects/gpt-cli-pro/gptcli.py
+    sudo ln -s /path/to/your/gpt-cli-pro/gptcli.py /usr/local/bin/gptcli
+    ```
+
+3.  **확인:**
+    새 터미널을 열거나 `rehash` (zsh) 또는 `hash -r` (bash)를 실행한 뒤, 아무 디렉터리에서나 아래 명령어를 입력해 보세요.
+    ```bash
+    gptcli --help 
+    ```
+    gptcli의 도움말이 나오면 성공입니다.
+
+### Windows
+
+Windows에서는 시스템 환경 변수 `Path`에 스크립트가 있는 폴더를 추가하는 것이 일반적입니다.
+
+1.  **환경 변수 `Path`에 폴더 추가:**
+    -   `시스템 속성` -> `고급` -> `환경 변수`로 이동합니다.
+    -   `사용자 변수` 또는 `시스템 변수` 목록에서 `Path`를 선택하고 `편집`을 클릭합니다.
+    -   `새로 만들기`를 눌러 `gptcli.py`가 있는 폴더의 전체 경로(예: `C:\Projects\gpt-cli-pro`)를 추가합니다.
+
+2.  **확인:**
+    새 명령 프롬프트(cmd)나 PowerShell 창을 열고, 아무 디렉터리에서나 아래 명령어를 입력합니다.
+    ```powershell
+    gptcli.py --help
+    ```
+    이름을 더 짧게 하고 싶다면, `gptcli.py` 파일의 이름을 `gptcli`로 변경할 수 있습니다. (이 경우, `Path`에 `.PY`가 `PATHEXT` 환경 변수에 포함되어 있어야 확장자 없이 실행됩니다.)
+
+---
+
+## 💡 평상시 사용 워크플로우 예시
+
+`gptcli`는 단순 질의응답을 넘어, 개발자의 일상적인 작업을 돕는 실용적인 도구입니다.
+
+### 시나리오 1: 기존 코드 분석 및 리팩터링 제안 받기
+
+1.  **프로젝트 파일 첨부:**
+    -   `gptcli`를 실행하고, 분석하고 싶은 파일들을 첨부합니다.
+    -   `/all_files` 명령어로 TUI 파일 선택기를 열어 프로젝트 구조를 보며 파일을 선택하거나,
+    -   `/files src/main.py src/utils/` 처럼 특정 파일이나 디렉터리를 직접 지정합니다.
+    -   첨부된 파일 목록과 예상 토큰 사용량이 표시됩니다.
+
+2.  **분석 요청:**
+    -   `/mode teacher`로 전환하여 코드를 깊이 있게 분석하는 '아키텍트' 페르소나를 활성화합니다.
+    -   "첨부된 코드의 전체 구조를 설명하고, `process_data` 함수의 비효율적인 부분을 찾아 리팩터링 방안을 제안해줘." 와 같이 구체적으로 요청합니다.
+    -   AI는 첨부된 코드를 기반으로 상세한 분석과 개선된 코드 예시를 제공합니다.
+
+3.  **코드 복사 및 적용:**
+    -   제안된 코드 블록이 마음에 들면, `/copy 1` 명령어로 즉시 클립보드에 복사하여 에디터에 붙여넣습니다.
+
+### 시나리오 2: 오류 메시지 디버깅
+
+1.  **오류 로그 및 관련 코드 첨부:**
+    -   오류가 발생한 터미널의 스택 트레이스(stack trace)를 복사하여 프롬프트에 붙여넣습니다.
+    -   `/files` 명령어로 오류와 관련된 소스 코드 파일을 첨부합니다.
+
+2.  **디버깅 요청:**
+    -   "첨부된 `main.py` 코드와 아래 오류 로그를 보고, '배열 인덱스 초과' 에러의 원인이 되는 부분을 찾아 수정해줘." 라고 질문합니다.
+
+3.  **수정 전/후 코드 비교 (Diff):**
+    -   AI가 수정된 코드 블록을 제안하면, 기존 코드와 어떻게 다른지 확인하고 싶을 수 있습니다.
+    -   이때 `/diff_code` 명령어로 TUI Diff 뷰어를 열어 두 코드의 차이점을 시각적으로 명확하게 비교하고, 변경 사항의 타당성을 검토합니다.
+
+### 시나리오 3: 새로운 기술 학습
+
+1.  **학습 모드 및 질문:**
+    -   `/mode general` 또는 `/mode teacher`로 AI의 역할을 설정합니다.
+    -   "Python의 `asyncio`와 `threading`의 차이점을 설명하고, 각각 어떤 상황에 사용하는 것이 적합한지 예제 코드와 함께 알려줘." 와 같이 질문합니다.
+
+2.  **즐겨찾기 저장:**
+    -   답변 내용이 유용하여 나중에 다시 보고 싶다면, `/savefav asyncio_vs_thread` 명령어로 마지막 질문을 즐겨찾기에 저장합니다.
+    -   나중에 `/usefav asyncio_vs_thread`로 똑같은 질문을 다시 하거나, `/favs`로 저장된 목록을 확인할 수 있습니다.
+
+---
+
+## 🛠️ 주요 명령어 목록
+
+| 명령어 | 설명 |
 |---|---|
-| /commands | 명령어 목록 |
-| /pretty_print | Pretty/Rich ↔ Raw 토글 |
-| /raw | 마지막 응답 원문 다시 출력 |
-| /select_model | 모델 선택 TUI |
-| /search_models gpt o3 | 모델 검색 후 ai_models.txt 갱신 |
-| /all_files | 파일 선택기(TUI) |
-| /files f1 f2 | 파일 직접 지정(재귀·무시규칙 적용) |
-| /clearfiles | 첨부 초기화 |
-| /mode <dev|general|teacher> [-s <session>] | 페르소나/세션 전환 |
-| /savefav <name> /usefav <name> /favs | 즐겨찾기 관리 |
-| /diff_code | 코드블록 간 Diff 뷰 |
-| /show_context [--top N] [-v] | 컨텍스트 리포트 표시 |
-| /reset /restore | 세션 초기화/복원 |
-| /copy <번호> | 해당 코드블록을 클립보드 복사(실패 시 원문 재출력) |
-| /exit | 종료 |
+| `/commands` | 전체 명령어 목록을 보여줍니다. |
+| `/pretty_print` | Rich 기반의 미려한 출력을 켜고 끕니다. |
+| `/raw` | 마지막 AI 응답을 순수 텍스트로 다시 출력합니다. |
+| `/select_model` | TUI를 열어 사용 가능한 모델 목록에서 모델을 선택합니다. |
+| `/search_models <키워드>` | OpenRouter에서 모델을 검색하여 `ai_models.txt`에 추가합니다. |
+| `/all_files` | TUI 파일 선택기를 엽니다. |
+| `/files <경로>...` | 지정된 파일이나 디렉터리를 대화에 첨부합니다. |
+| `/clearfiles` | 현재 첨부된 모든 파일을 초기화합니다. |
+| `/mode <dev\|general\|teacher>` | AI의 페르소나(시스템 프롬프트)를 변경합니다. |
+| `/savefav <이름>` | 마지막 질문을 즐겨찾기에 저장합니다. |
+| `/usefav <이름>` | 저장된 즐겨찾기 질문을 불러옵니다. |
+| `/favs` | 저장된 모든 즐겨찾기 목록을 보여줍니다. |
+| `/diff_code` | TUI 코드 비교 뷰어를 엽니다. |
+| `/show_context` | 현재 대화의 토큰 사용량에 대한 상세 보고서를 봅니다. |
+| `/reset` | 현재 세션을 백업하고 초기화합니다. |
+| `/restore` | 백업된 세션 목록에서 선택하여 복원합니다. |
+| `/copy <번호>` | 답변의 N번째 코드 블록을 클립보드에 복사합니다. |
+| `/exit` | 프로그램을 종료합니다. |
 
-### 첨부/멀티모달
-- /all_files 또는 /files로 추가
-- .gptignore_default + .gptignore 병합 규칙 준수
-- 이미지: data URL + 토큰 추정
-- PDF: 파일 파트(모델 호환성 필요)
+<br>
+<hr>
+<br>
 
----
+# GPT-CLI Pro — The Developer’s AI CLI (English Version)
 
-## 🧠 내부 구조(요약)
-
-- ask_stream: 스트리밍 엔진(Pretty/Raw), reasoning/코드 Live, fence 파서, 중첩·fragment·tail 처리, 동적/최대 높이
-- TokenEstimator: tiktoken 기반 텍스트/이미지/PDF 토큰(근사)
-- FileSelector(urwid): 디렉터리 재귀/부분선택/전체선택, 무시규칙 병합
-- ModelSearcher(urwid): OpenRouter 모델 API 검색/선택
-- CodeDiffer(urwid): unified_diff 렌더, 문맥 n 조정, 전체 보기 토글, 수평 스크롤, 사전 렉싱 하이라이트
-- Compact 모드: 과거 첨부 축약(플레이스홀더)
-- 세션: 메시지/모델/컨텍스트/usage 백업·복원·마크다운 저장·코드블록 저장
+**GPT-CLI Pro** is a conversational AI client meticulously engineered to integrate seamlessly into a developer's terminal workflow. Powered by OpenRouter's universal API, it allows you to effortlessly switch between state-of-the-art language models like Claude 3, GPT-4o, and Llama 3. It transcends simple Q&A, offering a suite of powerful features focused on maximizing developer productivity across all stages of development—from code analysis and review to debugging and learning.
 
 ---
 
-## 🧪 팁 & 문제 해결
+## ✨ Core Features
 
-### 1) /copy 실패(SSH)
-- 원인: 헤드리스(X 클립보드 없음). Git Bash는 X 서버 없음 → **VcXsrv/Xming** 필요. WSL2(WSLg)는 내장 X 서버로 성공 가능.
-- 이미 README 반영: 실패 시 원시 코드 재출력(패널/패딩 없음) → 바로 드래그/복사.
-
-### 2) 색상(16/256/TrueColor)
-- urwid는 초기화 시 `$TERM` 기반으로 색상 모드 결정. 256색 강제:
-  - 실행 전 `export TERM=xterm-256color`
-  - 코드에서 `screen = urwid.raw_display.Screen(); screen.set_terminal_properties(colors=256)` → MainLoop에 전달
-- HEX 색 사용 시에는 256 안전값으로 강등하는 유틸/팔레트 사용 권장.
-
-### 3) 스트리밍 중 취소
-- Ctrl+C 시, Live 안전 종료 및 “응답 중단” 출력 → 다음 프롬프트로 복귀
-
----
-
-## 🔐 보안
-- .gptignore_default + .gptignore로 비밀·대용량·불필요 경로 제외
-- SENSITIVE_KEYS 마스킹 훅(추가 확장 가능)
-
----
-
-## 📚 참고(Interfaces/Streaming)
-- Chat Completions 형식(타 공급자도 유사): [forefront.ai](https://docs.forefront.ai/api-reference/chat), [cohere.com](https://docs.cohere.com/v2/reference/chat-v1)
-- 메시지/컨텐츠 블록 개념(프레임워크 관점): [python.langchain.com](https://python.langchain.com/api_reference/core/messages.html)
-- 스트리밍 요청 패턴/설계: [ai.pydantic.dev](https://ai.pydantic.dev/api/models/base/)
+-   **Intelligent Streaming Output**: Renders AI responses in real-time with a beautiful UI powered by the Rich library.
+    -   **Reasoning Live**: Displays the "thought process" of supported models in a separate, fixed-height panel, offering transparency into how answers are generated.
+    -   **Code Live**: Code block panels dynamically adjust their height to fit the content, capping at a maximum height with a "...N lines omitted..." indicator to keep the view clean.
+-   **Robust Code Block Parser**: Accurately recognizes a wide variety of code block formats generated by LLMs.
+    -   Supports deeply indented fences (e.g., inside lists), and fences using both backticks (```) and tildes (~~~).
+    -   Intelligently avoids misinterpreting inline triple-backticks as code blocks.
+    -   Manages nested code blocks by tracking depth, ensuring correct parsing.
+-   **Powerful File Attachments**:
+    -   Attach project context safely and quickly using a TUI file selector (`/all_files`) that respects `.gptignore` rules.
+    -   Supports various file types, including images (.png, .jpg), PDFs, and source code.
+-   **TUI-based Interfaces**:
+    -   **Diff Viewer (`/diff_code`)**: Visually compare two code blocks (e.g., before and after a change). Dynamically adjust context lines (+/-), toggle a full-file view (f), and scroll horizontally (←/→) through long lines. Features accurate, Pygments-based syntax highlighting.
+    -   **Model Selection & Search (`/select_model`, `/search_models`)**: Easily switch models from your `ai_models.txt` list or discover and add new ones from OpenRouter.
+-   **Efficient Context Management**:
+    -   **Compact Mode**: Drastically reduces token usage in long conversations by compressing file attachments in past messages into simple placeholders (`[Attachment: filename]`).
+    -   **Context Report (`/show_context`)**: Visually breaks down token usage against the model's limit, detailing the cost of the system prompt, reserved space, and attachments.
+-   **Safe Clipboard Copy (`/copy`)**:
+    -   Instantly copy code from responses using the `/copy <number>` command.
+    -   Includes a built-in fallback for environments where clipboard access fails (like SSH sessions), reprinting the code as raw text for easy manual selection and copying.
 
 ---
 
-# GPT-CLI Pro (gptcli.py) — The Developer’s AI CLI (English)
+## 🚀 Installation and Setup
 
-GPT-CLI Pro is a power-user AI CLI built on OpenRouter (OpenAI-compatible Chat Completions). It ships real-time streaming (reasoning/code lives), a robust nested code fence parser, urwid TUIs (file/model pickers), a diff viewer, token/context reporting, sessions/history/favorites—everything opinionated for developers.
+### Step 1: Clone the Repository
+First, clone or download this repository to your local machine. You will need this path to register it as a global command.
+```bash
+git clone https://github.com/your-username/gpt-cli-pro.git
+cd gpt-cli-pro
+```
 
-- One API key to flip among Claude/GPT/Llama families
-- Streaming: Reasoning Live (fixed height), Code Live (dynamic→capped)
-- Line-anchored, indentation-tolerant, nested code fence parser for ```/~~~
-- urwid TUIs: file/model pickers and model search
-- Code diff (context ±, full-view toggle, horizontal scroll)
-- .gptignore_default + .gptignore merge, Compact mode to cut tokens
-- /copy with pyperclip and SSH-safe fallback (raw reprint)
+### Step 2: Install Dependencies
+`gptcli` uses several Python libraries. Install them all at once with this command:
+```bash
+pip install -r requirements.txt
+```
 
-## Features
-- Pretty vs Raw streaming. Pretty uses Rich:
-  - Reasoning Live (height=REASONING_PANEL_HEIGHT)
-  - Code Live (auto-sizes up to CODE_PREVIEW_PANEL_HEIGHT with “… N lines omitted”)
-- Robust fence parsing:
-  - only line-start fences (with left whitespace) count
-  - one info token allowed; in-line ```…``` never triggers code mode
-  - fragment wait and tail-close handling; nesting depth for inner fences
-- Multimodal attachments:
-  - File picker TUI respecting ignore rules
-  - Images as data-URL + token estimation
-  - PDF as file part (model-dependent)
-- Context budgeting:
-  - trim by context/system/reserves/vendor offsets
-  - Compact mode: reduce old user messages’ attachments into placeholders
-  - /show_context prints budgets, categories, top heavy messages
-- Diff viewer (urwid):
-  - unified_diff with context lines, full toggle, horizontal scroll
-  - tokenized highlighting via Pygments (pre-lexed per line, docstrings)
-- Model selection/search TUIs
-- Sessions / backups / code-block autosave
-
-Interfaces and streaming patterns resemble common Chat APIs ([forefront.ai](https://docs.forefront.ai/api-reference/chat), [cohere.com](https://docs.cohere.com/v2/reference/chat-v1)); content/message blocks are aligned with typical frameworks ([python.langchain.com](https://python.langchain.com/api_reference/core/messages.html)); streamed request design mirrors general patterns ([ai.pydantic.dev](https://ai.pydantic.dev/api/models/base/)).
-
-## Install
-See the Korean section (requirements.txt). Add `.env`:
+### Step 3: Set API Key
+Create a `.env` file in the project root directory and add your OpenRouter API key. You can get a key from the [OpenRouter Dashboard](https://openrouter.ai/keys).
 ```env
 OPENROUTER_API_KEY="sk-or-..."
 ```
 
-## Usage
-- Interactive: `gptcli`
-- One-off: `gptcli "question" --model openai/gpt-4o`
-- Commands: `/all_files`, `/files`, `/diff_code`, `/copy <n>`, `/select_model`, `/search_models`, `/pretty_print`, `/raw`, `/mode`, `/reset`, `/restore`, `/show_context`, `/exit`
+### Step 4: Global Configuration Directory
+`gptcli` uses a configuration folder at `~/.config/gptcli` in your home directory. The following files are auto-generated on the first run:
+-   `~/.config/gptcli/ai_models.txt`: An editable list of available AI models.
+-   `~/.config/gptcli/.gptignore_default`: Global ignore rules for files/directories.
 
-## Troubleshooting
-- /copy fails on SSH:
-  - Git Bash lacks X server; install VcXsrv/Xming, or use WSL2 (WSLg). The CLI already reprints raw code fallback for drag-copy.
-- 16/256/TrueColor:
-  - set `TERM=xterm-256color` before launch; pass a pre-configured Screen to MainLoop; down-convert hex to safe 256 palette entries.
+---
 
-## Security
-- Ignore rules to avoid leaking secrets or noise.
+## ⚙️ Using as a Global Command (Run `gptcli` Anywhere)
 
-## References
-- Chat completions: [forefront.ai](https://docs.forefront.ai/api-reference/chat), [cohere.com](https://docs.cohere.com/v2/reference/chat-v1)
-- Message/content blocks: [python.langchain.com](https://python.langchain.com/api_reference/core/messages.html)
-- Streaming models/patterns: [ai.pydantic.dev](https://ai.pydantic.dev/api/models/base/)
+Running the script with `python gptcli.py` every time is inconvenient. Set it up as a global command so you can run `gptcli` from any directory in your terminal.
+
+### Linux & macOS
+
+The recommended method is to create a symbolic link in a directory that is in your system's `PATH`.
+
+1.  **Grant Execute Permissions:**
+    Make the `gptcli.py` file executable.
+    ```bash
+    chmod +x gptcli.py
+    ```
+
+2.  **Create Symbolic Link:**
+    `/usr/local/bin` is included in the `PATH` on most systems by default.
+    ```bash
+    # Create a link named 'gptcli' pointing to the full path of your script.
+    # Example path: /home/user/projects/gpt-cli-pro/gptcli.py
+    sudo ln -s /path/to/your/gpt-cli-pro/gptcli.py /usr/local/bin/gptcli
+    ```
+
+3.  **Verify:**
+    Open a new terminal session or run `rehash` (zsh) / `hash -r` (bash), then type the following command from any directory:
+    ```bash
+    gptcli --help 
+    ```
+    If the help message appears, the setup was successful.
+
+### Windows
+
+The standard method is to add the script's folder to the system's `Path` environment variable.
+
+1.  **Add Folder to Path:**
+    -   Go to `System Properties` -> `Advanced` -> `Environment Variables`.
+    -   Under `System variables` or `User variables`, find `Path`, select it, and click `Edit`.
+    -   Click `New` and add the full path to the folder containing `gptcli.py` (e.g., `C:\Projects\gpt-cli-pro`).
+
+2.  **Verify:**
+    Open a new Command Prompt or PowerShell window and run the following command from any directory:
+    ```powershell
+    gptcli.py --help
+    ```
+    To run it without the `.py` extension, ensure `.PY` is included in your `PATHEXT` environment variable and rename
+    `gptcli.py` to `gptcli`.
+
+---
+
+## 💡 Common Workflows
+
+`gptcli` is a practical tool designed to assist with daily developer tasks.
+
+### Scenario 1: Analyzing Existing Code and Getting Refactoring Suggestions
+
+1.  **Attach Project Files:**
+    -   Launch `gptcli` and attach the files you want to analyze.
+    -   Use `/all_files` to open the TUI file picker or `/files src/main.py src/utils/` to specify paths directly.
+2.  **Request Analysis:**
+    -   Switch to an expert persona with `/mode teacher`.
+    -   Prompt: "Analyze the attached code, explain the overall architecture, and suggest a more efficient way to refactor the `process_data` function."
+3.  **Copy & Apply:**
+    -   Use `/copy 1` to instantly copy the suggested code block to your clipboard and paste it into your editor.
+
+### Scenario 2: Debugging an Error
+
+1.  **Provide Context:**
+    -   Paste the stack trace from your terminal directly into the prompt.
+    -   Attach the relevant source code file(s) with `/files`.
+2.  **Ask for a Fix:**
+    -   Prompt: "Based on the attached `main.py` and the error log below, find and fix the 'index out of bounds' error."
+3.  **Diff the Changes:**
+    -   When the AI provides a fixed code block, use `/diff_code` to open the TUI and visually compare the original code with the suggested fix to validate the changes.
+
+### Scenario 3: Learning a New Technology
+
+1.  **Set the Mode and Ask:**
+    -   Use `/mode teacher` to set the AI's role.
+    -   Prompt: "Explain the difference between `asyncio` and `threading` in Python, and provide code examples for when to use each."
+2.  **Save as Favorite:**
+    -   If the answer is useful, save it for later with `/savefav asyncio_vs_thread`.
+    -   You can ask the same question again with `/usefav asyncio_vs_thread` or view your list with `/favs`.
+
+---
+
+## 🛠️ Command Reference
+
+| Command | Description |
+|---|---|
+| `/commands` | Show the list of all available commands. |
+| `/pretty_print` | Toggle the beautiful Rich-based output on/off. |
+| `/raw` | Reprint the last AI response as raw text. |
+| `/select_model` | Open a TUI to select a different AI model. |
+| `/search_models <keyword>`| Search for models on OpenRouter and add them to `ai_models.txt`. |
+| `/all_files` | Open the TUI file selector. |
+| `/files <path>...`| Attach specified files or directories to the conversation. |
+| `/clearfiles` | Clear all currently attached files. |
+| `/mode <dev\|general\|teacher>`| Change the AI's persona (system prompt). |
+| `/savefav <name>` | Save the last prompt as a favorite. |
+| `/usefav <name>` | Use a saved favorite prompt. |
+| `/favs` | List all saved favorites. |
+| `/diff_code` | Open the TUI code comparison viewer. |
+| `/show_context` | View a detailed report of current token usage. |
+| `/reset` | Reset the current session after backing it up. |
+| `/restore` | Restore a session from a backup. |
+| `/copy <n>` | Copy the nth code block from the last response. |
+| `/exit` | Exit the program. |
