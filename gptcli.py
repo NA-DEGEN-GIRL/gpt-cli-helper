@@ -123,7 +123,7 @@ PDF_EXT = ".pdf"
 
 SENSITIVE_KEYS = ["secret", "private", "key", "api"]
 
-PREVIEW_BG = 'black'
+PREVIEW_BG = 'default'
 PALETTE = [                               
     ('key', 'yellow', 'black'),
     ('info', 'dark gray', 'black'),
@@ -599,6 +599,7 @@ def _demote_truecolor_to_256(spec: str, default: str = 'white') -> str:
     if attrs:
         out += ',' + attrs
     return out
+
 
 def _mk_attr(fg: str, bg: str, fb_bg: str) -> urwid.AttrSpec:
     fg_norm = _normalize_color_spec(fg) if fg else fg
@@ -2672,8 +2673,9 @@ class CodeDiffer:
         try:
             screen.set_terminal_properties(colors=256)
             screen.set_mouse_tracking()
-        except Exception:
-            pass
+            
+        except Exception as e:
+            console.print(f"[yellow]경고: 터미널 속성 설정 실패 ({e})[/yellow]")
 
         self.main_loop = urwid.MainLoop(
             self.frame,
