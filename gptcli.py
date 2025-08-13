@@ -4128,7 +4128,27 @@ def chat_mode(name: str, copy_clip: bool) -> None:
                 console.print(f"첨부파일 압축 모드가 {status}되었습니다.")
                 console.print("[dim]활성화 시: 과거 메시지의 첨부파일이 파일명만 남고 제거됩니다.[/dim]")
                 continue
-            
+
+            elif cmd == "/copy":
+                if not last_reply_code_blocks:
+                    console.print("[yellow]복사할 코드 블록이 없습니다.[/yellow]",highlight=False)
+                    continue
+                try:
+                    index = int(args[0]) - 1
+                    if 0 <= index < len(last_reply_code_blocks):
+                        code_to_copy = last_reply_code_blocks[index][1]
+                        pyperclip.copy(code_to_copy)
+                        console.print(f"[green]✅ 코드 블록 #{index + 1}이 클립보드에 복사되었습니다.[/green]", highlight=False)
+                    else:
+                        console.print(f"[red]오류: 1부터 {len(last_reply_code_blocks)} 사이의 번호를 입력하세요.[/red]")
+                                      
+                except (ValueError, IndexError):
+                    console.print("[red]오류: '/copy <숫자>' 형식으로 입력하세요. (예: /copy 1)[/red]")
+                
+                except Exception as e:
+                    console.print(f"[red]오류: {str(e)} 형식으로 입력하세요. (예: /copy 1)[/red]",highlight=False)
+
+                continue
             elif cmd == "/show_context":
                 # ─────────────────────────────────────────────────────────
                 # 2) /show_context 명령 처리 확장
@@ -4839,6 +4859,9 @@ def chat_mode(name: str, copy_clip: bool) -> None:
             continue
 
         reply, usage_info = result
+        last_reply_code_blocks = extract_code_blocks(reply)
+        if last_reply_code_blocks:
+            console.print(f"[dim]💡 {len(last_reply_code_blocks)}개의 코드 블록을 찾았습니다. '/copy <번호>'로 복사할 수 있습니다.[/dim]", highlight=False)
 
         # ✅ 여기에 토큰 추정 로직 추가
         if not usage_info:
