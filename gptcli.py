@@ -4131,22 +4131,40 @@ def chat_mode(name: str, copy_clip: bool) -> None:
 
             elif cmd == "/copy":
                 if not last_reply_code_blocks:
-                    console.print("[yellow]복사할 코드 블록이 없습니다.[/yellow]",highlight=False)
+                    console.print("[yellow]복사할 코드 블록이 없습니다.[/yellow]", highlight=False)
                     continue
                 try:
                     index = int(args[0]) - 1
                     if 0 <= index < len(last_reply_code_blocks):
-                        code_to_copy = last_reply_code_blocks[index][1]
-                        pyperclip.copy(code_to_copy)
-                        console.print(f"[green]✅ 코드 블록 #{index + 1}이 클립보드에 복사되었습니다.[/green]", highlight=False)
+                        # ✅ 수정된 부분: lang 정보도 함께 받음
+                        lang, code_to_copy = last_reply_code_blocks[index]
+                        
+                        # --- pyperclip 시도 ---
+                        try:
+                            pyperclip.copy(code_to_copy)
+                            console.print(f"[green]✅ 코드 블록 #{index + 1}이 클립보드에 복사되었습니다.[/green]", highlight=False)
+                        
+                        # ✅ 수정된 부분: pyperclip 실패 시 fallback 로직 추가
+                        except pyperclip.PyperclipException as e:
+                            console.print("\n" + "-"*50)
+                            console.print("[bold yellow]클립보드 복사 실패![/bold yellow]")
+                            console.print("[dim]pyperclip이 시스템 클립보드를 찾지 못했습니다 (SSH 환경 등).[/dim]")
+                            console.print("[dim]아래 코드를 직접 드래그하여 복사하세요.[/dim]")
+                            
+                            # Panel 없이 순수 코드를 그대로 출력 (오른쪽 공백 없음)
+                            console.print("-" * 50)
+                            console.print(code_to_copy, markup=False, highlight=False, end="")
+                            console.print("\n" + "-"*50)
+
                     else:
                         console.print(f"[red]오류: 1부터 {len(last_reply_code_blocks)} 사이의 번호를 입력하세요.[/red]")
-                                      
+
                 except (ValueError, IndexError):
                     console.print("[red]오류: '/copy <숫자>' 형식으로 입력하세요. (예: /copy 1)[/red]")
-                
+
+                # ✅ 수정: exception 포괄 범위를 pyperclip에만 한정
                 except Exception as e:
-                    console.print(f"[red]오류: {str(e)} 형식으로 입력하세요. (예: /copy 1)[/red]",highlight=False)
+                    console.print(f"[red]알 수 없는 오류 발생: {e}[/red]")
 
                 continue
             elif cmd == "/show_context":
