@@ -6,15 +6,8 @@
 
 **GPT-CLI Pro**는 개발자의 터미널 워크플로우에 완벽하게 통합되도록 설계된, 대화형 AI 클라이언트입니다. OpenRouter의 범용 API를 통해 다양한 최신 언어 모델(Claude 3, GPT-4o, Llama 3 등)을 손쉽게 전환하며 사용할 수 있습니다. 단순히 질문하고 답을 얻는 것을 넘어, 코드 분석, 리뷰, 디버깅, 학습 등 개발의 모든 단계에서 생산성을 극대화하는 데 초점을 맞춘 강력한 기능들을 제공합니다.
 
-<details>
-<summary><strong>▶ 데모 영상 보기</strong></summary>
-<p align="center">
-  <video src="https://raw.githubusercontent.com/NA-DEGEN-GIRL/gpt-cli-helper/main/assets/gptcli-demo.mp4"
-         controls muted playsinline loop width="80%">
-    Your browser does not support HTML5 video.
-  </video>
-</p>
-</details>
+## Quick Demo (GIF)
+![GPT-CLI Demo](assets/gptcli-demo.gif)
 
 ---
 
