@@ -68,6 +68,7 @@ rich_theme = Theme({
 CONFIG_DIR = Path.home() / "codes" / "gpt_cli"
 BASE_DIR = Path.cwd()
 REASONING_PANEL_HEIGHT = 10
+CODE_PREVIEW_PANEL_HEIGHT = 15
 
 COMPACT_ATTACHMENTS = True  # 첨부파일 압축 모드 (기본값: 비활성화)
 
@@ -3538,7 +3539,32 @@ def ask_stream(
                             # 코드 모드 내부 루프
                             while in_code_block:
                                 # 패널/뷰 업데이트(기존 로직 그대로)
-                                live.update(Panel(code_buffer[-4000:], title=f"[yellow]코드 ({language})[/yellow]", border_style="dim"))
+                                #live.update(Panel(code_buffer[-4000:], title=f"[yellow]코드 ({language})[/yellow]", border_style="dim"))
+                                lines = code_buffer.splitlines()
+                                total_lines = len(lines)
+                                
+                                # 패널 높이에서 제목/테두리 여유분(2)을 뺀 실제 내용 높이
+                                display_height = CODE_PREVIEW_PANEL_HEIGHT - 2
+                                
+                                # 표시할 내용 생성
+                                display_code = "\n".join(lines[-display_height:])
+                                if total_lines > display_height:
+                                    display_code = f"[dim]... ({total_lines - display_height}줄 생략) ...[/dim]\n{display_code}"
+                                
+                                # Syntax 객체로 감싸서 문법 하이라이팅 적용
+                                try:
+                                    live_syntax = Syntax(display_code, language, theme="monokai", background_color="#272822")
+                                except Exception:
+                                    # lexer 로드 실패 시 평문으로
+                                    live_syntax = Text(display_code)
+
+                                temp_panel = Panel(
+                                    live_syntax,
+                                    height=CODE_PREVIEW_PANEL_HEIGHT, # ✅ 고정 높이 적용
+                                    title=f"[yellow]코드 입력중 ({language}) | {total_lines} 줄[/yellow]",
+                                    border_style="dim"
+                                )
+                                live.update(temp_panel)
 
                                 # 다음 청크 수신
                                 chunk = next(stream_iter)
