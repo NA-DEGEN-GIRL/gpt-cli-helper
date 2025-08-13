@@ -1,45 +1,79 @@
-# GPT-CLI Pro: 개발자를 위한 궁극의 AI 터미널
+# GPT-CLI Pro (gptcli.py) — 터미널 최적화 AI 동반자
 
-![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.9%2B-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Status](https://img.shields.io/badge/status-active-success.svg)
 
-**GPT-CLI Pro**는 터미널 환경에서 AI의 능력을 최대한으로 활용하고자 하는 개발자와 파워 유저를 위한 차세대 명령줄 인터페이스입니다. 이 프로젝트는 **[OpenRouter](https://openrouter.ai/)를 핵심 API 게이트웨이로 활용**하여, Claude 3.5 Sonnet, GPT-4o, Llama 3 등 수십 개의 최신 LLM을 단일 API 키로 접근하고 전환할 수 있습니다.
+GPT-CLI Pro는 OpenRouter(=OpenAI 호환 Chat Completions) 위에서 동작하는 고급 터미널 AI 클라이언트입니다. 실시간 스트리밍(추론·코드 프리뷰), 중첩 코드블록 파서, 파일/모델 선택 TUI, 코드 Diff 뷰, 토큰·컨텍스트 리포트, 세션/히스토리/즐겨찾기까지 “개발자 관점”에서 필요한 기능을 한 데 통합했습니다.
 
-단순한 질의응답을 넘어, **파일 시스템 연동, 고급 자동 완성, 멀티모달 지원, 전역/지역 설정 분리** 등 개발 생산성을 극대화하는 강력한 기능들을 탑재했습니다.
-
----
-
-## ✨ 주요 기능 (Key Features)
-
-*   **🌐 다양한 AI 모델 접근 (Powered by OpenRouter)**: 하나의 API 엔드포인트와 키로 GPT, Claude, Llama 등 수십 가지의 경쟁력 있는 모델을 자유롭게 선택하고 테스트할 수 있습니다.
-*   **💻 전역 명령어 지원**: 터미널이 열려 있는 어느 경로에서든 `gptcli` 와 같은 단축 명령어로 즉시 실행할 수 있습니다.
-*   **⚙️ 중앙 설정 관리**: `~/codes/gpt_cli` 디렉토리에서 전역으로 사용할 AI 모델 목록(`ai_models.txt`)과 기본 무시 패턴(`.gptignore_default`)을 관리하여 모든 프로젝트에서 일관된 환경을 제공합니다.
-*   **⚡ 실시간 스트리밍 렌더링**: AI의 답변이 생성되는 과정을 실시간으로 확인하며, `rich` 라이브러리를 통해 아름답게 렌더링된 마크다운 및 코드 블록을 제공합니다.
-*   **🧠 지능형 파서**: **중첩된 코드 블록**(` ``` ` 안에 ` ``` `가 있는 경우)을 완벽하게 인식하고, AI의 답변을 구조적으로 정확하게 처리합니다.
-*   **💡 고급 자동 완성**: `prompt-toolkit` 기반의 강력한 자동 완성 기능을 제공합니다.
-    *   상황에 맞는 명령어(`/files`, `/mode` 등) 추천
-    *   파일 및 디렉터리 경로 자동 완성
-    *   첨부된 파일의 상대 경로(`my_folder/utils.py`)까지 완벽하게 완성
-*   **🌳 TUI 파일 선택기**: `urwid` 기반의 텍스트 UI를 통해 현재 디렉토리의 파일을 직관적으로 선택하고 AI에게 컨텍스트로 전달할 수 있습니다.
-*   **🚫 지능형 무시 패턴**:
-    *   **전역 설정** (`.gptignore_default`): 모든 프로젝트에 공통으로 적용할 무시 규칙(예: `.venv/`, `__pycache__/`)을 한 번만 설정합니다.
-    *   **프로젝트별 설정** (`.gptignore`): 현재 프로젝트에만 해당하는 특정 규칙을 추가합니다.
-*   **📄 출력 제어**:
-    *   `/pretty_print`: **고급 출력(Rich)**과 **순수 텍스트(Raw)** 모드를 실시간으로 토글합니다.
-    *   `/raw`: 고급 모드로 답변을 받은 후에도, 마지막 답변의 원본(Raw) 텍스트를 즉시 다시 볼 수 있습니다.
-*   **🖼️ 멀티모달 지원**: 텍스트뿐만 아니라 **이미지(.png, .jpg), PDF 문서** 파일을 첨부하여 시각적 컨텍스트를 포함한 질문이 가능합니다. (OpenRouter에서 지원하는 모델에 한함)
-*   **↔️ 코드 비교 (Diff)**: 로컬 파일과 AI가 생성한 코드를 즉시 비교하거나, 이전 응답과 현재 응답 간의 코드 변경점을 추적할 수 있습니다.
-*   **🔄 세션 관리**: 이름 기반으로 여러 대화 세션을 관리하고, `/mode` 명령어를 통해 모드와 세션을 유연하게 전환할 수 있습니다.
+- OpenRouter를 통해 Claude 3.x, GPT-4o, Llama 3 등 다양한 모델을 한 API 키로 전환/호출
+- 실시간 스트리밍: 추론(Reasoning) Live, 코드 Live(동적 높이→최대 높이 캡)
+- 중첩 코드블록·들여쓰기·인라인 오탐 방지까지 고려한 라인 기반 펜스 파서(```/~~~)
+- 파일 선택/모델 선택/모델 검색 등 urwid 기반 TUI
+- 전/후 응답 코드 Diff(문맥 줄수 ±, 전체 보기 토글, 가로 스크롤)
+- .gptignore_default + .gptignore 병합 규칙, Compact 모드로 토큰 절감
+- /copy: 클립보드 복사(pyclipboard) + SSH 환경 안전 대안(원시 코드 재출력)
 
 ---
 
-## 🚀 설치 및 설정
+## ✨ 핵심 기능
 
-### 1단계: 의존성 패키지 설치
+### 1) 스트리밍 출력(Pretty/Rich, Raw)
+- Pretty 모드: Rich 기반 실시간 렌더. 
+  - 추론 Live(높이 REASONING_PANEL_HEIGHT=10)
+  - 코드 Live(동적→최대 CODE_PREVIEW_PANEL_HEIGHT=15, 초과 시 “N줄 생략” 안내)
+  - Markdown 인라인 강조를 안전 처리(simple_markdown_to_rich)
+- Raw 모드: 응답 청크를 그대로 출력. reasoning 채널이 오면 함께 출력됨.
 
-이 스크립트는 여러 서드파티 라이브러리를 사용합니다. 아래 내용을 `requirements.txt` 파일로 저장하고 설치하세요.
+참고: Chat Completions API 인터페이스는 OpenAI 호환이 널리 쓰이는 표준입니다. 유사한 페이로드/스트리밍 패턴은 다른 공급자 문서에서도 확인할 수 있습니다([forefront.ai](https://docs.forefront.ai/api-reference/chat), [cohere.com](https://docs.cohere.com/v2/reference/chat-v1)).
 
+### 2) 견고한 코드블록 파서
+- 줄-시작(왼쪽 공백 허용) + 3개 이상 ``` 또는 ~~~ 만 “시작”으로 인정
+- info 토큰(언어)은 0~1개만 허용, 언어 뒤 설명 텍스트가 오면 “시작”으로 보지 않음
+- 인라인 ```…``` 오탐 방지
+- 개행 없는 조각(fragment) 보호(시작/닫힘 의심 시 대기)
+- 닫힘 펜스 tail(개행 없이 끝) 처리
+- 중첩 fence 깊이 관리(nesting_depth), fence 문자 동일·길이 조건 준수
+
+메시지/컨텐츠 블록 개념은 여러 프레임워크에서 유사하게 정의됩니다([python.langchain.com](https://python.langchain.com/api_reference/core/messages.html)).
+
+### 3) 첨부/멀티모달
+- /all_files TUI(urwid) + .gptignore_default + .gptignore 병합 규칙
+- 이미지(.png/.jpg 등): data URL로 전송, 토큰 추정(자동 리사이즈/타일링 근사)
+- PDF: 파일 파트로 전송(모델 지원 한정). 토큰 대략 근사(PDF 텍스트 추출 시 정확도 향상)
+
+### 4) 컨텍스트 관리/절감(Compact)
+- Trim: 모델 컨텍스트·시스템 프롬프트·벤더 오프셋·예약분 고려
+- Compact 모드(기본 on): 과거 유저 메시지의 첨부를 플레이스홀더로 축약
+- /show_context: 예산/사용/항목별(텍스트·이미지·PDF) 분해, 상위 N 무거운 메시지 표시
+
+스트리밍/요청 모델 패턴은 범용적이며, 다른 SDK/프레임워크의 스트림 패턴과도 유사합니다([ai.pydantic.dev](https://ai.pydantic.dev/api/models/base/)).
+
+### 5) Diff 뷰(urwid)
+- unified_diff 기반, 문맥 줄수 n(±/F 키로 확장/축소·전체 보기 토글)
+- 수평 스크롤(←→/Shift로 가속), 줄 번호/표식/구분자
+- Pygments 사전 렉싱으로 줄 단위 정확 하이라이트(멀티라인 docstring 처리)
+- 색상 팔레트: 16/256 환경 고려(HEX → 안전 색 강등/팔레트 표준화 옵션 제공)
+
+### 6) 모델 선택/검색(TUI)
+- /select_model: ai_models.txt 기반 리스트에서 선택
+- /search_models: OpenRouter 모델 API 검색 후 선택 항목 저장
+
+### 7) 세션/저장/복원
+- .gpt_sessions/session_<name>.json: 메시지/모델/컨텍스트/usage 누적
+- 마지막 응답 .md 저장(gpt_markdowns/), 코드블록 자동 파일 저장(gpt_codes/)
+- /reset: 세션 백업+초기화, /restore: 백업에서 복원(코드 파일 포함)
+
+### 8) /copy (클립보드) + 안전 대안
+- `/copy <번호>`: 해당 코드블록을 pyperclip.copy()
+- SSH/헤드리스 환경에서 실패 시(예: X11 미설정) → **원시 코드 그대로 재출력**(패딩/패널 없이), 사용자가 드래그·복사 가능
+- Git Bash는 X 서버 내장 X, WSL2(WSLg)는 내장 X 서버가 있어 성공 확률 높음
+
+---
+
+## 🚀 설치
+
+### 1) Python/패키지
 ```text
 # requirements.txt
 openai
@@ -49,151 +83,167 @@ urwid
 prompt-toolkit
 pyperclip
 pathspec
+tiktoken
+PyPDF2
+Pillow
+requests
+pygments
 ```
-
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2단계: 스크립트 저장 및 전역 설정 파일 자동 생성
-
-시스템 어디서든 `gptcli` 명령어를 사용하기 위한 설정입니다.
-
-1.  **스크립트 파일 저장**:
-    `gptcli.py` 스크립트 파일을 컴퓨터의 영구적인 위치(예: `~/scripts`)에 저장합니다.
-    ```bash
-    mkdir -p ~/scripts
-    # gptcli.py 파일을 ~/scripts/gptcli.py 로 이동 또는 저장하세요.
-    ```
-
-2.  **전역 설정 파일 자동 생성 (최초 1회 실행)**:
-    `gptcli`를 처음 실행하면, **전역 설정 디렉토리(`~/.config/gpt_cli`)** 와 함께 아래의 필수 설정 파일들이 **자동으로 생성**됩니다. 사용자는 이 파일들의 존재를 신경 쓸 필요 없이 바로 프로그램을 사용할 수 있으며, 필요 시에만 수정하면 됩니다.
-    *   `~/codes/gpt_cli/ai_models.txt`: TUI 모델 선택기에서 사용할 모델 목록. [OpenRouter 모델 목록](https://openrouter.ai/models)을 참조하여 원하는 모델을 추가하세요.
-    *   `~/codes/gpt_cli/.gptignore_default`: 모든 프로젝트에 공통으로 적용될 기본 무시 패턴
-
-    만약 수동으로 생성하고 싶다면 아래 명령어를 사용할 수 있습니다.
-    ```bash
-    # 1. 전역 설정 디렉토리 생성
-    mkdir -p ~/codes/gpt_cli
-
-    # 2. 전역 ai_models.txt 파일 생성 및 기본 내용 채우기
-    cat > ~/codes/gpt_cli/ai_models.txt << EOF
-    ```
-
-### 3단계: 전역 명령어 등록 (macOS / Linux)
-
-스크립트를 `gptcli` 라는 명령어로 실행할 수 있도록 시스템 경로에 심볼릭 링크(바로가기)를 생성합니다.
-
-1.  **스크립트에 실행 권한 부여**:
-    ```bash
-    chmod +x ~/scripts/gptcli.py
-    ```
-
-2.  **심볼릭 링크 생성 (명령어 등록)**:
-    `/usr/local/bin`은 시스템 `PATH`에 포함된 표준 디렉토리입니다.
-    ```bash
-    # 'gptcli' 라는 이름의 명령어를 생성합니다. 원하는 다른 이름으로 변경 가능합니다.
-    # sudo는 시스템 폴더에 쓰는 권한을 얻기 위함입니다.
-    sudo ln -s ~/scripts/gptcli.py /usr/local/bin/gptcli
-    ```
-    *스크립트를 업데이트할 경우 `sudo ln -sf ...` 와 같이 `-f` 옵션을 추가하면 기존 링크를 덮어쓸 수 있습니다.*
-
-3.  **설정 확인**:
-    새 터미널을 열고 아무 디렉토리에서나 `gptcli`를 실행하여 프로그램이 시작되는지 확인합니다.
-
----
-
-## 📝 프로젝트별 환경 설정
-
-### .env 파일 (OpenRouter API 키 관리)
-이 프로젝트는 **OpenRouter**를 API 게이트웨이로 사용합니다. [OpenRouter 웹사이트](https://openrouter.ai/)에서 가입 후 API 키를 발급받아, 프로젝트 루트에 `.env` 파일을 만들어 `OPENROUTER_API_KEY`를 설정하세요. 이 파일은 `.gitignore`에 추가하는 것을 강력히 권장합니다.
-
+### 2) API 키(.env)
 ```env
-# .env
 OPENROUTER_API_KEY="sk-or-..."
 ```
 
-### 컨텍스트 제외 규칙 (.gptignore 및 .gptignore_default)
-
-`.gitignore`와 동일한 문법으로, AI 컨텍스트에 포함하고 싶지 않은 파일이나 폴더를 지정합니다. 이는 민감한 정보(예: `.env`), 불필요한 가상 환경 폴더(`venv`), 의존성 폴더(`node_modules`) 등을 TUI 파일 선택기나 자동 완성에서 숨기고 실수로 첨부하는 것을 방지합니다.
-
--   **전역 규칙 (`~/codes/gpt_cli/.gptignore_default`)**: 모든 프로젝트에 공통으로 적용됩니다. 최초 실행 시 자동으로 생성되며, 전역적으로 무시하고 싶은 패턴(예: `__pycache__/`, `.vscode/`)을 여기에 추가하면 편리합니다.
--   **프로젝트별 규칙 (`./.gptignore`)**: 현재 작업 중인 프로젝트에만 적용됩니다. 전역 규칙에 더해 이 프로젝트에서만 특별히 무시하고 싶은 파일(예: `/dist`, `specific_log.txt`)을 지정합니다.
-
-```text
-# 예시: ./.gptignore
-
-# 이 프로젝트의 빌드 결과물
-/build/
-/dist/
-
-# 이 프로젝트에서만 사용하는 로그 파일
-detailed_analysis.log
-```
+### 3) 전역 설정/디렉터리
+- 기본 전역 디렉터리: `~/codes/gpt_cli`
+- 최초 실행 시 자동 생성:
+  - `ai_models.txt` (모델 목록)
+  - `.gptignore_default` (전역 무시 규칙)
 
 ---
 
 ## 💡 사용법
 
-### 대화형 모드 (기본)
-터미널에 명령어만 입력하면 세션 기반의 채팅이 시작됩니다.
-
+### 대화형 모드
 ```bash
 gptcli
 ```
 
-### 단일 프롬프트 모드
-간단한 질문에 대한 답변만 빠르게 얻고 싶을 때 사용합니다. 질문을 인자로 전달하면 답변 출력 후 프로그램이 즉시 종료됩니다.
-
+### 단일 프롬프트
 ```bash
-# 기본 모델로 질문
-gptcli "파이썬에서 리스트의 중복 요소를 제거하는 가장 효율적인 방법은?"
-
-# 특정 모델을 지정하여 질문
-gptcli "React 상태 관리 라이브러리 추천해줘" --model anthropic/claude-3.5-sonnet
+gptcli "파이썬에서 set으로 중복 제거 예시" --model openai/gpt-4o
 ```
 
-### 명령어 목록 (대화형 모드 전용)
-채팅 세션 중 `>` 프롬프트에서 아래 명령어를 사용할 수 있습니다.
+### 주요 명령어(대화 중)
+| 명령 | 설명 |
+|---|---|
+| /commands | 명령어 목록 |
+| /pretty_print | Pretty/Rich ↔ Raw 토글 |
+| /raw | 마지막 응답 원문 다시 출력 |
+| /select_model | 모델 선택 TUI |
+| /search_models gpt o3 | 모델 검색 후 ai_models.txt 갱신 |
+| /all_files | 파일 선택기(TUI) |
+| /files f1 f2 | 파일 직접 지정(재귀·무시규칙 적용) |
+| /clearfiles | 첨부 초기화 |
+| /mode <dev|general|teacher> [-s <session>] | 페르소나/세션 전환 |
+| /savefav <name> /usefav <name> /favs | 즐겨찾기 관리 |
+| /diff_code | 코드블록 간 Diff 뷰 |
+| /show_context [--top N] [-v] | 컨텍스트 리포트 표시 |
+| /reset /restore | 세션 초기화/복원 |
+| /copy <번호> | 해당 코드블록을 클립보드 복사(실패 시 원문 재출력) |
+| /exit | 종료 |
 
-| 명령어                        | 설명                                                                           | 예시                                                    |
-| :---------------------------- | :----------------------------------------------------------------------------- | :------------------------------------------------------ |
-| `/commands`                   | 사용 가능한 모든 명령어 목록을 표시합니다.                                   | `/commands`                                             |
-| `/pretty_print`               | 고급 출력(Rich)과 순수 텍스트(Raw) 모드를 전환합니다.                          | `/pretty_print`                                         |
-| `/raw`                        | 마지막 답변을 서식 없는 순수 텍스트로 다시 출력합니다.                         | `/raw`                                                  |
-| `/select_model`               | `ai_models.txt` 기반의 TUI 모델 선택기를 엽니다.                               | `/select_model`                                         |
-| `/all_files`                  | TUI 파일 선택기를 열어 컨텍스트에 추가할 파일을 선택합니다.                    | `/all_files`                                            |
-| `/files <paths..>`            | 공백으로 구분하여 파일/폴더 경로를 직접 수동으로 지정합니다.                   | `/files main.py utils/`                                 |
-| `/clearfiles`                 | 현재 첨부된 모든 파일을 초기화합니다.                                          | `/clearfiles`                                           |
-| `/mode <name> [-s <session>]` | AI 페르소나를 변경하고, 선택적으로 다른 세션을 불러옵니다.                     | `/mode teacher -s project-analysis`                     |
-| `/savefav <name>`             | 마지막 질문을 즐겨찾기에 저장합니다.                                           | `/savefav python-dedup`                                 |
-| `/usefav <name>`              | 저장된 즐겨찾기 질문을 불러와 입력합니다.                                      | `/usefav python-dedup`                                  |
-| `/favs`                       | 저장된 모든 즐겨찾기 목록을 출력합니다.                                        | `/favs`                                                 |
-| `/diffme`                     | 첨부된 파일과 AI의 응답 코드 간의 차이를 비교합니다.                           | `/diffme`                                               |
-| `/diffcode`                   | 이전 AI 응답과 현재 응답의 코드 블록 간 차이를 비교합니다.                     | `/diffcode`                                             |
-| `/reset`                      | 현재 세션의 모든 대화 내역을 삭제하고 백업합니다.                              | `/reset`                                                |
-| `/exit`                       | 프로그램을 종료합니다.                                                         | `/exit`                                                 |
-
----
-
-## 🛠️ 기술 스택 (Tech Stack)
-
-*   **핵심 API 게이트웨이**:
-    *   [OpenRouter](https://openrouter.ai/): 다양한 LLM 모델(GPT, Claude, Llama 등)에 대한 단일 액세스 포인트 제공
-*   **API 클라이언트 라이브러리**:
-    *   [openai-python](https://github.com/openai/openai-python): OpenRouter의 OpenAI 호환 엔드포인트와 통신하기 위해 사용
-*   **UI / 렌더링**:
-    *   [Rich](https://github.com/Textualize/rich): 아름다운 터미널 UI 및 마크다운/코드 렌더링
-    *   [Urwid](https://github.com/urwid/urwid): TUI 파일/모델 선택기 구현
-    *   [Prompt Toolkit](https://github.com/prompt-toolkit/python-prompt-toolkit): 강력한 대화형 프롬프트 세션
-*   **설정 및 파일 처리**:
-    *   [python-dotenv](https://github.com/theskumar/python-dotenv): `.env` 파일 관리
-    *   [pathspec](https://github.com/cpburnz/python-path-spec): `.gitignore` 스타일 패턴 매칭
-*   **기타 유틸리티**:
-    *   [pyperclip](https://github.com/asweigart/pyperclip): 클립보드 복사 기능
+### 첨부/멀티모달
+- /all_files 또는 /files로 추가
+- .gptignore_default + .gptignore 병합 규칙 준수
+- 이미지: data URL + 토큰 추정
+- PDF: 파일 파트(모델 호환성 필요)
 
 ---
 
-## 📜 라이선스 (License)
+## 🧠 내부 구조(요약)
 
-이 프로젝트는 MIT 라이선스 하에 배포됩니다.
+- ask_stream: 스트리밍 엔진(Pretty/Raw), reasoning/코드 Live, fence 파서, 중첩·fragment·tail 처리, 동적/최대 높이
+- TokenEstimator: tiktoken 기반 텍스트/이미지/PDF 토큰(근사)
+- FileSelector(urwid): 디렉터리 재귀/부분선택/전체선택, 무시규칙 병합
+- ModelSearcher(urwid): OpenRouter 모델 API 검색/선택
+- CodeDiffer(urwid): unified_diff 렌더, 문맥 n 조정, 전체 보기 토글, 수평 스크롤, 사전 렉싱 하이라이트
+- Compact 모드: 과거 첨부 축약(플레이스홀더)
+- 세션: 메시지/모델/컨텍스트/usage 백업·복원·마크다운 저장·코드블록 저장
+
+---
+
+## 🧪 팁 & 문제 해결
+
+### 1) /copy 실패(SSH)
+- 원인: 헤드리스(X 클립보드 없음). Git Bash는 X 서버 없음 → **VcXsrv/Xming** 필요. WSL2(WSLg)는 내장 X 서버로 성공 가능.
+- 이미 README 반영: 실패 시 원시 코드 재출력(패널/패딩 없음) → 바로 드래그/복사.
+
+### 2) 색상(16/256/TrueColor)
+- urwid는 초기화 시 `$TERM` 기반으로 색상 모드 결정. 256색 강제:
+  - 실행 전 `export TERM=xterm-256color`
+  - 코드에서 `screen = urwid.raw_display.Screen(); screen.set_terminal_properties(colors=256)` → MainLoop에 전달
+- HEX 색 사용 시에는 256 안전값으로 강등하는 유틸/팔레트 사용 권장.
+
+### 3) 스트리밍 중 취소
+- Ctrl+C 시, Live 안전 종료 및 “응답 중단” 출력 → 다음 프롬프트로 복귀
+
+---
+
+## 🔐 보안
+- .gptignore_default + .gptignore로 비밀·대용량·불필요 경로 제외
+- SENSITIVE_KEYS 마스킹 훅(추가 확장 가능)
+
+---
+
+## 📚 참고(Interfaces/Streaming)
+- Chat Completions 형식(타 공급자도 유사): [forefront.ai](https://docs.forefront.ai/api-reference/chat), [cohere.com](https://docs.cohere.com/v2/reference/chat-v1)
+- 메시지/컨텐츠 블록 개념(프레임워크 관점): [python.langchain.com](https://python.langchain.com/api_reference/core/messages.html)
+- 스트리밍 요청 패턴/설계: [ai.pydantic.dev](https://ai.pydantic.dev/api/models/base/)
+
+---
+
+# GPT-CLI Pro (gptcli.py) — The Developer’s AI CLI (English)
+
+GPT-CLI Pro is a power-user AI CLI built on OpenRouter (OpenAI-compatible Chat Completions). It ships real-time streaming (reasoning/code lives), a robust nested code fence parser, urwid TUIs (file/model pickers), a diff viewer, token/context reporting, sessions/history/favorites—everything opinionated for developers.
+
+- One API key to flip among Claude/GPT/Llama families
+- Streaming: Reasoning Live (fixed height), Code Live (dynamic→capped)
+- Line-anchored, indentation-tolerant, nested code fence parser for ```/~~~
+- urwid TUIs: file/model pickers and model search
+- Code diff (context ±, full-view toggle, horizontal scroll)
+- .gptignore_default + .gptignore merge, Compact mode to cut tokens
+- /copy with pyperclip and SSH-safe fallback (raw reprint)
+
+## Features
+- Pretty vs Raw streaming. Pretty uses Rich:
+  - Reasoning Live (height=REASONING_PANEL_HEIGHT)
+  - Code Live (auto-sizes up to CODE_PREVIEW_PANEL_HEIGHT with “… N lines omitted”)
+- Robust fence parsing:
+  - only line-start fences (with left whitespace) count
+  - one info token allowed; in-line ```…``` never triggers code mode
+  - fragment wait and tail-close handling; nesting depth for inner fences
+- Multimodal attachments:
+  - File picker TUI respecting ignore rules
+  - Images as data-URL + token estimation
+  - PDF as file part (model-dependent)
+- Context budgeting:
+  - trim by context/system/reserves/vendor offsets
+  - Compact mode: reduce old user messages’ attachments into placeholders
+  - /show_context prints budgets, categories, top heavy messages
+- Diff viewer (urwid):
+  - unified_diff with context lines, full toggle, horizontal scroll
+  - tokenized highlighting via Pygments (pre-lexed per line, docstrings)
+- Model selection/search TUIs
+- Sessions / backups / code-block autosave
+
+Interfaces and streaming patterns resemble common Chat APIs ([forefront.ai](https://docs.forefront.ai/api-reference/chat), [cohere.com](https://docs.cohere.com/v2/reference/chat-v1)); content/message blocks are aligned with typical frameworks ([python.langchain.com](https://python.langchain.com/api_reference/core/messages.html)); streamed request design mirrors general patterns ([ai.pydantic.dev](https://ai.pydantic.dev/api/models/base/)).
+
+## Install
+See the Korean section (requirements.txt). Add `.env`:
+```env
+OPENROUTER_API_KEY="sk-or-..."
+```
+
+## Usage
+- Interactive: `gptcli`
+- One-off: `gptcli "question" --model openai/gpt-4o`
+- Commands: `/all_files`, `/files`, `/diff_code`, `/copy <n>`, `/select_model`, `/search_models`, `/pretty_print`, `/raw`, `/mode`, `/reset`, `/restore`, `/show_context`, `/exit`
+
+## Troubleshooting
+- /copy fails on SSH:
+  - Git Bash lacks X server; install VcXsrv/Xming, or use WSL2 (WSLg). The CLI already reprints raw code fallback for drag-copy.
+- 16/256/TrueColor:
+  - set `TERM=xterm-256color` before launch; pass a pre-configured Screen to MainLoop; down-convert hex to safe 256 palette entries.
+
+## Security
+- Ignore rules to avoid leaking secrets or noise.
+
+## References
+- Chat completions: [forefront.ai](https://docs.forefront.ai/api-reference/chat), [cohere.com](https://docs.cohere.com/v2/reference/chat-v1)
+- Message/content blocks: [python.langchain.com](https://python.langchain.com/api_reference/core/messages.html)
+- Streaming models/patterns: [ai.pydantic.dev](https://ai.pydantic.dev/api/models/base/)
