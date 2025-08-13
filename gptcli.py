@@ -3328,6 +3328,8 @@ def ask_stream(
     use_reasoning = True #any(x in model.lower() for x in ['o1-', 'reasoning'])
     extra_body = {'reasoning': {}} if use_reasoning else {}
 
+    was_cancelled = False
+
     with console.status("[cyan]Loading...", spinner="dots"):
         try:
             stream = client.chat.completions.create(
@@ -3336,9 +3338,17 @@ def ask_stream(
                 stream=True,
                 extra_body=extra_body,
             )
+        except KeyboardInterrupt:
+            was_cancelled = True
+            console.print("\n[yellow]⚠️ 응답이 중단되었습니다.[/yellow]")
+            snap_scroll_to_bottom()
+            return None
+        
         except OpenAIError as e:
             console.print(f"[red]API 오류: {e}[/red]")
             return None
+    
+    
 
     if not pretty_print:
         full_reply = ""
@@ -3374,6 +3384,21 @@ def ask_stream(
                     content = delta.content or ""
                     full_reply += content
                     console.print(content, end="", markup=False, highlight=False)
+
+        except KeyboardInterrupt:
+            was_cancelled = True
+            if 'live' in locals() and locals()['live'].is_started:
+                try:
+                    locals()['live'].stop()
+                except Exception:
+                    pass
+            if 'reasoning_live' in locals() and locals()['reasoning_live'].is_started:
+                try:
+                    _collapse_live_area(locals()['reasoning_live'], clear_height=REASONING_PANEL_HEIGHT)
+                except Exception:
+                    pass
+            console.print("\n[yellow]⚠️ 응답이 중단되었습니다.[/yellow]")
+            snap_scroll_to_bottom()
 
         except StopIteration:
             pass
@@ -3506,7 +3531,7 @@ def ask_stream(
                         nesting_depth = 0
                         code_buffer = ""
 
-                        # 코드 Live 시작(현재 환경에서 transient=False가 더 안정이라면 그대로)
+                        # height 강제하면, live 끝난뒤 문제가 생길수있나?
                         live = Live(console=console, auto_refresh=True, refresh_per_second=4, transient=False)
                         live.start()
                         try:
@@ -3599,6 +3624,20 @@ def ask_stream(
                         
                     last_flush_time = current_time
         
+    except KeyboardInterrupt:
+        was_cancelled = True
+        if 'live' in locals() and locals()['live'].is_started:
+            try:
+                locals()['live'].stop()
+            except Exception:
+                pass
+        if 'reasoning_live' in locals() and locals()['reasoning_live'].is_started:
+            try:
+                _collapse_live_area(locals()['reasoning_live'], clear_height=REASONING_PANEL_HEIGHT)
+            except Exception:
+                pass
+        console.print("\n[yellow]⚠️ 응답이 중단되었습니다.[/yellow]")
+    
     except StopIteration:
         if normal_buffer:
             try:
@@ -4768,14 +4807,21 @@ def chat_mode(name: str, copy_clip: bool) -> None:
         #sys.exit(0)        
 
         # ── OpenRouter 호출
-        result = ask_stream(
-            messages_to_send, 
-            model, 
-            mode, 
-            model_context_limit=model_context, 
-            pretty_print=pretty_print_enabled,
-            current_attached_files=attached
-        )
+        try:
+            result = ask_stream(
+                messages_to_send, 
+                model, 
+                mode, 
+                model_context_limit=model_context, 
+                pretty_print=pretty_print_enabled,
+                current_attached_files=attached
+            )
+        except KeyboardInterrupt:
+            console.print("\n[yellow]작업이 취소되었습니다.[/yellow]") 
+            if messages and messages[-1]["role"] == "user":
+                messages.pop()
+            snap_scroll_to_bottom()
+            continue
 
         
         if result is None:
