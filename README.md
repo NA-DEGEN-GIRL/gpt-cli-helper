@@ -9,8 +9,9 @@
 <details>
 <summary><strong>▶ 데모 영상 보기</strong></summary>
 <p align="center">
-  <video autoplay loop muted playsinline width="80%">
-    <source src="https://raw.githubusercontent.com/NA-DEGEN-GIRL/gpt-cli-helper/main/assets/gptcli-demo.mp4" type="video/mp4">
+  <video src="https://raw.githubusercontent.com/NA-DEGEN-GIRL/gpt-cli-helper/main/assets/gptcli-demo.mp4"
+         controls muted playsinline loop width="80%">
+    Your browser does not support HTML5 video.
   </video>
 </p>
 </details>
