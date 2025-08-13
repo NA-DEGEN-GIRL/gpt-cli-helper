@@ -1941,6 +1941,9 @@ class CodeDiffer:
         self.preview_h_offset = 0  # preview 뷰 가로 오프셋
         self.max_line_length = 0  # 현재 보이는 줄 중 최대 길이
 
+        self.context_lines = 3 # 기본 문맥 줄 수
+        self.show_full_diff = False # 전체 보기 모드 토글 상태
+
     def _calc_preview_visible_lines(self) -> int:
         """
         터미널 rows에 맞춰 프리뷰 본문(코드) 가시 줄 수를 계산.
@@ -2401,12 +2404,17 @@ class CodeDiffer:
         old_line_tokens = lex_file_by_lines(old_item['path'], old_lexer)
         new_line_tokens = lex_file_by_lines(new_item['path'], new_lexer)
 
+        if self.show_full_diff:
+            context_lines = max(len(old_lines), len(new_lines))
+        else:
+            context_lines = self.context_lines
+
         diff = list(difflib.unified_diff(
             old_lines, new_lines,
             fromfile=f"a/{old_item['path'].name}",
             tofile=f"b/{new_item['path'].name}",
             lineterm='',
-            n=3
+            n=context_lines
         ))
         if not diff:
             self.footer.original_widget.set_text("두 파일이 동일합니다.")
@@ -2533,8 +2541,8 @@ class CodeDiffer:
                 scroll_info = f" [H:{h_offset_ref['value']}]"
             if max_line_len > 100:
                 scroll_info += f" [←→: 가로스크롤]"
-            
-            footer_text = f"PgUp/Dn: 스크롤 | Home/End: 처음/끝 | ←→: 가로 | Q: 닫기{scroll_info}"
+            context_info = f" [+/-/F: 문맥({self.context_lines})]" if not self.show_full_diff else " [문맥: 전체]"
+            footer_text = f"PgUp/Dn: 스크롤 | Home/End: 처음/끝 | ←→: 가로 | Q: 닫기{scroll_info}{context_info}"
             return urwid.AttrMap(urwid.Text(footer_text, wrap='clip'), 'header')
         
         diff_footer = update_footer()
@@ -2580,6 +2588,20 @@ class CodeDiffer:
                         self.main_loop.draw_screen()
                     except Exception:
                         pass
+
+                elif key == '+':
+                    self.context_lines = min(self.context_lines + 2, 99)
+                    self.show_full_diff = False
+                    regenerate_diff_view()
+
+                elif key == '-':
+                    self.context_lines = max(0, self.context_lines - 2)
+                    self.show_full_diff = False
+                    regenerate_diff_view()
+
+                elif key == 'f':
+                    self.show_full_diff = not self.show_full_diff
+                    regenerate_diff_view()
                 
                 # ✅ 가로 스크롤 처리
                 elif key == 'right':
