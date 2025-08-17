@@ -7,4 +7,4 @@ test*/
 .gpt_sessions
 .venv
 *.png
-.pdf
+*.pdf
