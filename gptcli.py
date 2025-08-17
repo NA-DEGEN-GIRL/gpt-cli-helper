@@ -51,10 +51,6 @@ from pygments import lex as pyg_lex
 from pygments.lexers import guess_lexer_for_filename, TextLexer
 import src.constants as constants
 
-# .env 로드
-load_dotenv()
-
-
 class TokenEstimator:
     def __init__(self, console: Console, model: str = "gpt-4"):
         """
@@ -2761,33 +2757,33 @@ class ConfigManager:
             return
 
         default_patterns = """
-# 이 파일은 모든 프로젝트에 공통으로 적용되는 전역 gptcli 무시 규칙입니다.
-# 사용자가 자유롭게 수정할 수 있습니다.
+            # 이 파일은 모든 프로젝트에 공통으로 적용되는 전역 gptcli 무시 규칙입니다.
+            # 사용자가 자유롭게 수정할 수 있습니다.
 
-# --- 일반적인 무시 목록 ---
-.DS_Store
-.env
-*.pyc
-*.swp
+            # --- 일반적인 무시 목록 ---
+            .DS_Store
+            .env
+            *.pyc
+            *.swp
 
-# --- Python 관련 ---
-__pycache__/
-.venv/
-venv/
-env/
+            # --- Python 관련 ---
+            __pycache__/
+            .venv/
+            venv/
+            env/
 
-# --- 버전 관리 및 IDE 설정 ---
-.git/
-.vscode/
-.idea/
+            # --- 버전 관리 및 IDE 설정 ---
+            .git/
+            .vscode/
+            .idea/
 
-# --- 이 앱 자체의 파일들 ---
-.gpt_sessions/
-.gpt_prompt_history.txt
-.gpt_favorites.json
-.gptignore
-gpt_outputs/
-"""
+            # --- 이 앱 자체의 파일들 ---
+            .gpt_sessions/
+            .gpt_prompt_history.txt
+            .gpt_favorites.json
+            .gptignore
+            gpt_outputs/
+            """
         try:
             self.DEFAULT_IGNORE_FILE.write_text(default_patterns.strip(), encoding="utf-8")
         except Exception as e:
@@ -4883,6 +4879,7 @@ class AIStreamParser:
         return re.match(rf'^{re.escape(fence_char)}{{{max(3, fence_len)},}}\s*$', s) is not None
 
 def main() -> None:
+    load_dotenv()
     try:
         cfg = ConfigManager()
         chosen_session = cfg.load_current_session_name() or "default"
