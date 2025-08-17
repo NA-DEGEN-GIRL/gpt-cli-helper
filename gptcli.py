@@ -229,6 +229,12 @@ class GPTCLI:
         # --- TUI 관련 참조 ---
         self.active_tui_loop: Optional[urwid.MainLoop] = None
 
+        # 현재 세션 포인터 파일 갱신
+        try:
+            self.config.save_current_session_name(self.current_session_name)
+        except Exception:
+            pass
+
     def _setup_prompt_session(self) -> PromptSession:
         command_list = [cmd.split()[0] for cmd in constants.COMMANDS.strip().split('\n')]
         command_completer = FuzzyCompleter(WordCompleter(command_list, ignore_case=True))
@@ -326,6 +332,7 @@ class GPTCLI:
         self.model = data.get("model", self.default_model)
         self.model_context = data.get("context_length", self.default_context_length)
         self.usage_history = data.get("usage_history", [])
+        self.mode = data.get("mode", self.mode or "dev")
 
     def _prepare_user_message(self, user_input: str) -> Dict[str, Any]:
         """첨부 파일을 포함하여 API에 보낼 사용자 메시지 객체를 생성합니다."""
@@ -402,6 +409,11 @@ class GPTCLI:
             system_prompt, final_messages, self.model, self.pretty_print_enabled
         )
 
+        try:
+            self.command_handler._snap_scroll_to_bottom()
+        except Exception:
+            pass
+
         if result is None:
             self.messages.pop() # API 호출 실패/취소 시 마지막 메시지 제거
             return
@@ -416,7 +428,7 @@ class GPTCLI:
             self.usage_history.append(usage_info)
 
         self.config.save_session(
-            self.current_session_name, self.messages, self.model, self.model_context, self.usage_history
+            self.current_session_name, self.messages, self.model, self.model_context, self.usage_history, mode=self.mode,
         )
 
         # 5. 후처리 (코드 블록 저장 등)
@@ -487,8 +499,20 @@ class GPTCLI:
         
         # 종료 전 마지막 세션 저장
         self.config.save_session(
-            self.current_session_name, self.messages, self.model, self.model_context, self.usage_history
+            self.current_session_name,
+            self.messages,
+            self.model,
+            self.model_context,
+            self.usage_history,
+            mode=self.mode,  # ← [추가]
         )
+
+        # 현재 세션 포인터 갱신
+        try:
+            self.config.save_current_session_name(self.current_session_name)
+        except Exception:
+            pass
+
         self.console.print("\n[bold cyan]세션이 저장되었습니다. 안녕히 가세요![/bold cyan]")
 
 class Utils:
@@ -2619,11 +2643,14 @@ class ThemeManager:
 
             # ▼ restore 전용 가독성 개선 팔레트
             ('list_row', 'default', 'default'),
-            ('list_focus', 'black', 'light gray'),
+            ('list_focus', 'default', 'dark gray'),
             ('muted', 'dark gray', 'default'),
             ('row_title', 'white,bold', 'default'),
             ('badge', 'black', 'dark cyan'),
             ('badge_focus', 'white', 'dark blue'),
+
+            ('muted_focus', 'light gray', 'dark gray'),
+            ('row_title_focus', 'white,bold', 'dark gray'),
         ]
         
         # 프리뷰 문법 하이라이팅 (syn_*)
@@ -2709,6 +2736,9 @@ class ConfigManager:
         self.MODELS_FILE = self.CONFIG_DIR / "ai_models.txt"
         self.DEFAULT_IGNORE_FILE = self.CONFIG_DIR / ".gptignore_default"
         
+        # 현재 세션 포인터 파일(.gpt_session)
+        self.CURRENT_SESSION_FILE = self.BASE_DIR / ".gpt_session"
+
         # --- 자동 초기화 ---
         self._initialize_directories()
         self._create_default_ignore_file_if_not_exists()
@@ -2774,15 +2804,38 @@ gpt_outputs/
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
         return root
-    # --- Session Management ---
+    
+    # --- Current Session I/O ---
+    def load_current_session_name(self) -> Optional[str]:
+        """
+        .gpt_session 파일에서 현재 세션명을 읽어 반환합니다.
+        파일이 없거나 읽을 수 없으면 None.
+        """
+        try:
+            if self.CURRENT_SESSION_FILE.exists():
+                name = self.CURRENT_SESSION_FILE.read_text(encoding="utf-8").strip()
+                return name or None
+        except Exception:
+            return None
+        return None
 
+    def save_current_session_name(self, name: str) -> None:
+        """
+        .gpt_session 파일에 현재 세션명을 저장합니다. 실패해도 흐름을 막지 않습니다.
+        """
+        try:
+            self.CURRENT_SESSION_FILE.write_text(str(name).strip(), encoding="utf-8")
+        except Exception:
+            pass
+
+    # --- Session Management ---
     def get_session_path(self, name: str) -> Path:
         """세션 이름에 해당하는 파일 경로를 반환합니다."""
         return self.SESSION_DIR / f"session_{name}.json"
 
     def load_session(self, name: str) -> Dict[str, Any]:
         """지정된 이름의 세션 데이터를 로드합니다."""
-        default_data = {"messages": [], "model": "openai/gpt-5", "context_length": 200000, "usage_history": []}
+        default_data = {"messages": [], "model": "openai/gpt-5", "context_length": 200000, "usage_history": [], "mode":"dev"}
         path = self.get_session_path(name)
         data = Utils._load_json(path, default_data)
         
@@ -2796,14 +2849,32 @@ gpt_outputs/
             
         return data
 
-    def save_session(self, name: str, msgs: List[Dict], model: str, context_length: int, usage_history: List[Dict]) -> None:
+    def save_session(
+        self,
+        name: str,
+        msgs: List[Dict],
+        model: str,
+        context_length: int,
+        usage_history: List[Dict],
+        mode: Optional[str] = None,  # ← [추가]
+    ) -> None:
         """세션 데이터를 파일에 저장합니다."""
         path = self.get_session_path(name)
+        existing = {}
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                existing = {}
+
+        mode_to_save = (mode if mode is not None else existing.get("mode") or "dev")
+
         data = {
             "messages": msgs,
             "model": model,
             "context_length": context_length,
             "usage_history": usage_history or [],
+            "mode": mode_to_save,
             "total_usage": {
                 "total_prompt_tokens": sum(u.get("prompt_tokens", 0) for u in (usage_history or [])),
                 "total_completion_tokens": sum(u.get("completion_tokens", 0) for u in (usage_history or [])),
@@ -3143,6 +3214,7 @@ class CommandHandler:
                     getattr(self.app, "model", ""),
                     getattr(self.app, "model_context", 0),
                     getattr(self.app, "usage_history", []),
+                    mode=getattr(self.app, "mode", "dev"),
                 )
 
             # 세션 JSON 로드 → backup_meta 추가 → 단일 스냅샷으로 저장
@@ -3190,18 +3262,20 @@ class CommandHandler:
         self.app.model = data.get("model", getattr(self.app, "default_model", self.app.model))
         self.app.model_context = data.get("context_length", getattr(self.app, "default_context_length", self.app.model_context))
         self.app.usage_history = data.get("usage_history", [])
+        self.app.mode = data.get("mode", getattr(self.app, "mode", "dev"))
 
-    def _restore_session_single(self, session_name: str) -> bool:
+    def _restore_session_single(self, session_name: str) -> Optional[Dict[str, Any]]:
         """
-        세션별 '단일' 스냅샷에서 복원
-        - 세션 JSON: backups/session_<slug>.json → 실제 세션 파일로 저장 후 앱 메모리 로드
+        세션별 '단일' 스냅샷에서 복원하고, 성공 시 세션 데이터를 반환합니다.
+        - 세션 JSON: backups/session_<slug>.json → 실제 세션 파일로 저장
         - 코드: gpt_codes/backup/<slug>/ → gpt_codes 로 복사
+        - [변경] 앱 상태를 직접 수정하지 않고, 로드된 데이터를 반환합니다.
         """
         bj = self._single_backup_json(session_name)
         if not bj.exists():
             if hasattr(self, "console"):
                 self.console.print(f"[yellow]스냅샷을 찾을 수 없습니다: {bj}[/yellow]", highlight=False)
-            return False
+            return None
 
         try:
             if hasattr(self, "Utils"):
@@ -3213,22 +3287,27 @@ class CommandHandler:
             model = data.get("model", getattr(self.app, "model", ""))
             ctx = data.get("context_length", getattr(self.app, "model_context", 0))
             usage = data.get("usage_history", [])
+            mode = data.get("mode")
 
-            # 세션 파일로 쓰기 + 메모리 로드
-            self.config.save_session(session_name, msgs, model, ctx, usage)
-            self._load_session_into_app(session_name)
+            # 1. 파일 시스템 작업: 세션 파일로 쓰기
+            self.config.save_session(session_name, msgs, model, ctx, usage, mode=mode)
 
+            # 2. 파일 시스템 작업: 코드 파일 복원
             removed, copied = self._restore_code_snapshot_single(session_name)
+            
             if hasattr(self, "console"):
                 self.console.print(
                     f"[green]복원 완료:[/green] session='{session_name}' (codes: -{removed} +{copied})",
                     highlight=False
                 )
-            return True
+            
+            # 3. [변경] 성공적으로 파일 I/O를 마친 후, 로드된 데이터를 반환
+            return data
+            
         except Exception as e:
             if hasattr(self, "console"):
                 self.console.print(f"[red]복원 실패(session={session_name}): {e}[/red]", highlight=False)
-            return False
+            return None
 
     def dispatch(self, user_input: str) -> bool:
         """
@@ -3284,15 +3363,149 @@ class CommandHandler:
         self.app.mode = parsed_args.mode_name
         self.console.print(f"[green]모드 변경: {old_mode} → {self.app.mode}[/green]", highlight=False)
 
+        # 변경 즉시 세션에 반영
+        try:
+            self.config.save_session(
+                getattr(self.app, "current_session_name", "default"),
+                getattr(self.app, "messages", []),
+                getattr(self.app, "model", ""),
+                getattr(self.app, "model_context", 0),
+                getattr(self.app, "usage_history", []),
+                mode=self.app.mode,
+            )
+        except Exception:
+            pass
+
+    def _choose_session_via_tui(self) -> Optional[str]:
+        """
+        스냅샷(backups)과 라이브(.gpt_sessions)를 통합한 세션 목록을 TUI로 표시하고
+        사용자 선택 결과의 '세션명'을 반환합니다. 취소 시 None.
+        """
+        import urwid
+
+        current = getattr(self.app, "current_session_name", None)
+        # 통합 목록(현재 제외, 중복 제거)
+        names = self.config.get_session_names(include_backups=True, exclude_current=current)
+        if not names:
+            self.console.print("[yellow]표시할 세션이 없습니다.[/yellow]", highlight=False)
+            return None
+
+        def _backup_json_for(name: str) -> Path:
+            return self._single_backup_json(name)
+
+        def _live_json_for(name: str) -> Path:
+            return self.config.get_session_path(name)
+
+        # [내부 헬퍼] JSON 경로→ 표시 라벨/세션명 추출
+        def _read_label_and_name(p: Path) -> Tuple[str, str]:
+            def _extract_text_from_content(content: Any) -> Tuple[str, int]:
+                if isinstance(content, str):
+                    return content, 0
+                if isinstance(content, list):
+                    text_part = ""
+                    attach_cnt = 0
+                    for part in content:
+                        if part.get("type") == "text":
+                            if not text_part:
+                                text_part = part.get("text", "")
+                        else:
+                            attach_cnt += 1
+                    return text_part, attach_cnt
+                return str(content), 0
+
+            name = p.stem.replace("session_", "")
+            label = name
+            try:
+                data = json.loads(p.read_text(encoding="utf-8", errors="ignore"))
+                meta = data.get("backup_meta", {}) or {}
+                name = str(meta.get("session") or data.get("name") or name).strip() or name
+                msg_count = meta.get("message_count", len(data.get("messages", [])))
+                updated = meta.get("backup_at", data.get("last_updated") or "N/A")
+                model = (meta.get("model") or data.get("model") or "")
+                model = model.split("/")[-1] if model else "unknown"
+                size_kb = p.stat().st_size / 1024.0
+
+                label = f"{name}   | 💬 {msg_count} | 🤖 {model} | 🕘 {updated} | 📦 {size_kb:.1f}KB"
+
+                previews: List[str] = []
+                messages = data.get("messages", [])
+                displayable = [m for m in messages if m.get("role") in ("user", "assistant")]
+                for m in displayable[-4:]:
+                    role = m.get("role")
+                    content = m.get("content", "")
+                    text, attach_cnt = _extract_text_from_content(content)
+                    text = (text or "").strip().replace("\n", " ")
+                    if attach_cnt > 0:
+                        text = f"[{attach_cnt} 첨부] {text}"
+                    if len(text) > 50:
+                        text = text[:48] + "…"
+                    icon = "👤" if role == "user" else "🤖"
+                    previews.append(f"{icon} {text}" if text else f"{icon} (빈 메시지)")
+                if not previews:
+                    previews = ["(메시지 없음)"]
+                label += "\n   " + "\n   ".join(previews)
+            except Exception:
+                pass
+            return label, name
+
+        # 버튼 목록 구성
+        items: List[urwid.Widget] = [
+            urwid.Text("전환할 세션을 선택하세요 (Enter:선택, Q:취소)"),
+            urwid.Divider()
+        ]
+        chosen: List[Optional[str]] = [None]
+
+        def _exit_with(name: Optional[str]) -> None:
+            chosen[0] = name
+            raise urwid.ExitMainLoop()
+
+        added = 0
+        for nm in names:
+            # [우선순위] 스냅샷 JSON이 있으면 그걸로 미리보기, 없으면 라이브 JSON
+            bj = _backup_json_for(nm)
+            lj = _live_json_for(nm)
+            p = bj if bj.exists() else lj
+            try:
+                label, sess_name = _read_label_and_name(p)
+            except Exception:
+                label, sess_name = (nm, nm)
+            btn = urwid.Button(label)
+            urwid.connect_signal(btn, "click", lambda _, n=sess_name: _exit_with(n))
+            items.append(urwid.AttrMap(btn, None, focus_map="myfocus"))
+            added += 1
+
+        if added == 0:
+            self.console.print("[yellow]선택할 세션이 없습니다.[/yellow]", highlight=False)
+            return None
+
+        listbox = urwid.ListBox(urwid.SimpleFocusListWalker(items))
+
+        def unhandled(key):
+            if isinstance(key, str) and key.lower() == "q":
+                _exit_with(None)
+
+        palette = self.theme_manager.get_urwid_palette()
+        loop = urwid.MainLoop(listbox, palette=palette, unhandled_input=unhandled)
+        loop.run()
+        # TUI 종료 후, 터미널 뷰포트 스냅(스크롤 튀는 현상 완화)
+        self._snap_scroll_to_bottom()
+        return chosen[0]
+
+
     def handle_session(self, args: List[str]) -> None:
         """
-        세션 전환(단일 스냅샷 정책)
-        - 전환 직전: 현재 세션 스냅샷 → 성공 시 live/코드 파일 삭제
-        - 전환: 스냅샷 우선 복원 → 없으면 (마이그레이션) 타깃 live 파일 로드+즉시 스냅샷 → 그래도 없으면 신규 생성
+        세션 전환(단일 스냅샷 정책, 통합 엔트리)
+        - /session            → TUI 목록에서 선택해 전환
+        - /session <세션명>    → 해당 세션으로 즉시 전환(스냅샷 우선)
         """
+        # [추가] 인자 없으면 TUI 진입
         if not args or not args[0].strip():
-            self.console.print("[yellow]사용법: /session <세션명>[/yellow]", highlight=False)
-            return
+            target = self._choose_session_via_tui()
+            if not target:
+                self.console.print("[dim]세션 전환이 취소되었습니다.[/dim]", highlight=False)
+                return
+            # TUI로 얻은 target을 args처럼 이어서 처리
+            args = [target]
 
         target = args[0].strip()
         current = getattr(self.app, "current_session_name", None)
@@ -3313,57 +3526,69 @@ class CommandHandler:
                     highlight=False
                 )
 
-        # 2) 타깃 세션 전환
-        # 2-1) 스냅샷이 있으면 최우선 복원
+        # 2) 타깃 세션 전환(스냅샷 우선)
         if self._single_backup_json(target).exists():
             if self._restore_session_single(target):
+                # [중요] 복원 후 앱 상태/포인터 갱신
+                self._load_session_into_app(target)  # ← 핵심
+                try:
+                    self.config.save_current_session_name(self.app.current_session_name)
+                except Exception:
+                    pass
                 self.console.print(
                     f"[green]세션 전환 완료 → '{target}' (스냅샷 복원)[/green]",
                     highlight=False
                 )
             else:
-                # 스냅샷이 손상된 경우: live 파일이 있으면 로드, 없으면 신규
+                # 손상 시 라이브로 폴백(있다면)
                 tpath = self.config.get_session_path(target)
                 if tpath.exists():
                     self._load_session_into_app(target)
-                    # 마이그레이션: 즉시 단일 스냅샷 생성해 일관성 확보
                     self._snapshot_session_single(target, reason="migrate-live-to-snapshot")
                     self.console.print(
                         f"[yellow]스냅샷 손상 → live 로드 후 스냅샷 생성: '{target}'[/yellow]",
                         highlight=False
                     )
                 else:
-                    self.config.save_session(target, [], self.app.default_model, self.app.default_context_length, [])
+                    self.config.save_session(target, [], self.app.default_model, self.app.default_context_length, [],
+                                             mode=getattr(self.app, "mode", "dev"))
                     self._load_session_into_app(target)
                     self.console.print(
                         f"[yellow]스냅샷 손상 → 빈 세션 생성: '{target}'[/yellow]",
                         highlight=False
                     )
         else:
-            # 2-2) 스냅샷이 없다면, (마이그레이션) 타깃 live 파일이 있는지 한 번만 확인
+            # 스냅샷이 없으면 라이브 있는지 확인
             tpath = self.config.get_session_path(target)
             if tpath.exists():
                 self._load_session_into_app(target)
-                # 즉시 스냅샷 생성(단일 스냅샷 정책으로 이관)
                 self._snapshot_session_single(target, reason="migrate-live-to-snapshot")
                 self.console.print(
                     f"[green]세션 전환 완료 → '{target}' (live 로드·스냅샷 생성)[/green]",
                     highlight=False
                 )
             else:
-                # 둘 다 없으면 신규
-                self.config.save_session(target, [], self.app.default_model, self.app.default_context_length, [])
+                self.config.save_session(
+                    target, [], self.app.default_model, self.app.default_context_length, [],
+                    mode=getattr(self.app, "mode", "dev"),
+                )
                 self._load_session_into_app(target)
                 self.console.print(
                     f"[green]새 세션 생성 → '{target}'[/green]",
                     highlight=False
                 )
 
-        # 3) 첨부 초기화(세션 간 오염 방지)
+        # 3) 첨부 초기화
         if getattr(self.app, "attached", None):
             self.app.attached.clear()
             self.console.print("[dim]첨부 파일 목록이 초기화되었습니다.[/dim]", highlight=False)
 
+        # 4) 현재 세션 포인터 갱신
+        try:
+            self.config.save_current_session_name(getattr(self.app, "current_session_name", target))
+        except Exception:
+            pass
+    
     def handle_backup(self, args: List[str]) -> None:
         """
         현재 세션 단일 스냅샷 저장(덮어쓰기)
@@ -3452,13 +3677,28 @@ class CommandHandler:
     
     def _snap_scroll_to_bottom(self) -> None:
         """
-        TUI(urwid)에서 복귀 후, 터미널 뷰포트가 버퍼 상단에 고정되는 현상을 방지하기 위해
-        아주 작은 출력(개행)을 한 번 찍어 즉시 맨 아래로 스냅시킨다.
+        urwid TUI 종료 직후, 터미널 뷰포트가 위쪽에 '묶이는' 현상을 방지하기 위해
+        최소 출력으로 바닥 스냅을 유발한다.
         """
         try:
-            #sys.stdout.write("")
-            #sys.stdout.flush()
-            self.console.print("",end="")
+            # [권장안 1] 가장 확실한 방법: 개행 + flush
+            # 줄 하나를 실제로 밀어내 스크롤을 유발한다.
+            self.console.print("\n", end="")  # [수정 포인트]
+            try:
+                self.console.file.flush()      # [수정 포인트]
+            except Exception:
+                pass
+
+            # [선택안] 줄바꿈이 화면에 보이는 것이 싫다면: 커서를 위로 1줄 되돌린다.
+            # - 스크롤은 유지되면서, 빈 줄이 “보이는” 효과를 최소화.
+            # - ANSI: CSI 1A (커서 위로 1줄), 여기선 원시 ANSI를 직접 기록.
+            if getattr(self.console, "is_terminal", False):
+                try:
+                    self.console.file.write("\x1b[1A")  # [선택 포인트]
+                    self.console.file.flush()
+                except Exception:
+                    pass
+
         except Exception:
             pass
 
@@ -3807,6 +4047,9 @@ class CommandHandler:
                     "[yellow]경고: 스냅샷 실패로 live/코드 파일을 삭제하지 않았습니다.[/yellow]",
                     highlight=False
                 )
+                # [안전장치] 스냅샷 실패 시, 복원 프로세스를 중단하여 데이터 유실 방지
+                self.console.print("[red]안전을 위해 복원 작업을 중단합니다.[/red]", highlight=False)
+                return
         elif cur and cur == session_name:
             # 동일 세션 복원 시에는 스냅샷 생략(백업 보호)
             self.console.print(
@@ -3814,9 +4057,19 @@ class CommandHandler:
                 highlight=False
             )
 
-        if self._restore_session_single(session_name):
+        # [변경] 1. 모든 파일 I/O를 먼저 수행하고 결과 데이터를 받음
+        restored_data = self._restore_session_single(session_name)
+
+        # [변경] 2. 파일 작업이 성공했을 때만 앱의 메모리 상태를 갱신
+        if restored_data:
+            self._load_session_into_app(session_name)
+            # load_session_into_app은 파일에서 다시 읽으므로, restored_data를 직접 넘길 필요는 없음
+            try:
+                self.config.save_current_session_name(session_name)
+            except Exception:
+                pass
             self.console.print(
-                f"[green]복원 완료 및 세션 스위치 → '{session_name}'[/green]",
+                f"[green]세션 전환 완료 → '{session_name}'[/green]",
                 highlight=False
             )
         else:
@@ -3824,184 +4077,6 @@ class CommandHandler:
                 f"[red]복원 실패: 대상 스냅샷을 찾을 수 없거나 읽기 실패[/red]",
                 highlight=False
             )
-
-    def handle_restore(self, args: List[str]) -> None:
-        """
-        단일 스냅샷 복원
-        - /restore                → 스냅샷 보유 세션 목록(TUI)에서 선택
-        - /restore <session>      → 해당 세션 스냅샷으로 즉시 복원
-        복원 전: 현재 세션 스냅샷 → 성공 시 live/코드 파일 삭제
-        복원 후: 현재 세션을 제외한 '복원 가능 목록'을 안내 출력
-        """
-        import urwid
-
-        target = args[0].strip() if args else None
-
-        # TUI에서 고르지 않고 바로 세션명이 주어진 경우
-        if target:
-            return self._restore_flow(target)
-
-        # 스냅샷 JSON 수집
-        root = self._backup_root_dir()
-        files = sorted(root.glob("session_*.json"))
-        if not files:
-            self.console.print("[yellow]복원 가능한 스냅샷이 없습니다.[/yellow]", highlight=False)
-            return
-
-        current = getattr(self.app, "current_session_name", None)
-
-        sessions_data = []
-        for fj in files:
-            try:
-                data = json.loads(fj.read_text(encoding="utf-8", errors='ignore'))
-            except Exception:
-                # 파싱 실패 시 파일명으로만 표현
-                name_guess = fj.stem.replace("session_", "")
-                if current and name_guess == current:
-                    continue  # 현재 세션 제외
-                sessions_data.append({
-                    "name": name_guess,
-                    "count": "?",
-                    "updated": "Unknown",
-                    "previews": ["(파일 읽기 오류)"],
-                })
-                continue
-
-            meta = data.get("backup_meta", {})
-            name = str(meta.get("session") or data.get("name") or fj.stem.replace("session_", "")).strip() or fj.stem
-            if current and name == current:
-                continue  # 현재 세션 제외
-
-            messages = data.get("messages", [])
-            msg_count = meta.get("message_count", len(messages))
-            updated = meta.get("backup_at", "N/A")
-
-            # 최근 메시지 2개 미리보기(클립/단선)
-            previews = []
-            displayable = [m for m in messages if m.get("role") in ("user", "assistant")]
-            for m in displayable[-2:]:
-                role = m.get("role")
-                content = m.get("content", "")
-                if isinstance(content, list):
-                    text_part = next((p.get("text", "") for p in content if p.get("type") == "text"), "")
-                    num_attachments = sum(1 for p in content if p.get("type") != "text")
-                    if num_attachments > 0:
-                        content = f"[{num_attachments} 첨부] " + text_part
-                    else:
-                        content = text_part
-                text = str(content).strip().replace("\n", " ")
-                if len(text) > 120:
-                    text = text[:118] + "…"
-                icon = "👤" if role == "user" else "🤖"
-                previews.append(f"{icon} {text}" if text else f"{icon} (빈 메시지)")
-            if not previews:
-                previews = ["(메시지 없음)"]
-
-            sessions_data.append({
-                "name": name,
-                "count": msg_count,
-                "updated": updated,
-                "previews": previews,
-            })
-
-        if not sessions_data:
-            self.console.print("[yellow]현재 세션을 제외하니 표시할 스냅샷이 없습니다.[/yellow]", highlight=False)
-            return
-
-        # ───── 보기 개선된 행 위젯 ─────
-        def make_badge(text: str) -> urwid.Widget:
-            # 배지(역상) - 포커스 시 배지 색상도 함께 바뀌도록 AttrMap 이중 적용
-            badge = urwid.AttrMap(urwid.Text(f" {text} "), 'badge', 'badge_focus')
-            return badge
-
-        class SessionRow(urwid.WidgetWrap):
-            def __init__(self, entry: Dict[str, Any]):
-                self.session_name = entry["name"]
-
-                # 헤더: 제목 | 오른쪽 배지(말풍선, 시간)
-                title = urwid.Text(('row_title', f"{entry['name']}"), wrap='clip')
-                badge_count = make_badge(f"💬 {entry['count']}")
-                badge_time = make_badge(f"🕘 {entry['updated']}")
-                header_cols = urwid.Columns(
-                    [
-                        ('weight', 1, title),
-                        ('pack', urwid.Padding(badge_count, left=1, right=0)),
-                        ('pack', urwid.Padding(badge_time, left=1, right=0)),
-                    ],
-                    dividechars=1,
-                )
-
-                # 프리뷰(최대 2줄, clip)
-                prev_lines = []
-                for p in entry['previews']:
-                    prev_lines.append(urwid.Text(('muted', p), wrap='clip'))
-                if not prev_lines:
-                    prev_lines.append(urwid.Text(('muted', "(메시지 없음)"), wrap='clip'))
-
-                # 행 구성: 여백 + 헤더 + 프리뷰 + 구분선
-                pile = urwid.Pile([header_cols] + prev_lines)
-                padded = urwid.Padding(pile, left=2, right=2)
-                # 포커스 시 행 배경만 부드럽게
-                super().__init__(urwid.AttrMap(padded, 'list_row', 'list_focus'))
-
-            def selectable(self):
-                return True
-
-        # 리스트 구성
-        header = urwid.Pile([
-            urwid.Text([("row_title", "세션 스냅샷 선택")]),
-            urwid.Text([("muted", "Enter:선택, Q:취소, ↑/↓:이동")]),
-            urwid.Divider()
-        ])
-
-        body_widgets: List[urwid.Widget] = [header]
-        for entry in sessions_data:
-            body_widgets.append(SessionRow(entry))
-            body_widgets.append(urwid.Divider())  # 행 사이 간격
-
-        walker = urwid.SimpleFocusListWalker(body_widgets)
-        listbox = urwid.ListBox(walker)
-
-        result: List[Optional[str]] = [None]
-
-        def unhandled(key):
-            if key in ('q', 'Q'):
-                result[0] = None
-                raise urwid.ExitMainLoop()
-            if key == 'enter':
-                focus_w = listbox.focus
-                # header/divider가 포커스일 수 있으므로 방어
-                if isinstance(focus_w, urwid.AttrMap):
-                    inner = focus_w.base_widget
-                    if isinstance(inner, urwid.Padding) and isinstance(inner.original_widget, urwid.Pile):
-                        # 바로 위(SessionRow) 래핑 구조를 타고 올라가기 어렵기 때문에,
-                        # walker에서 역으로 SessionRow를 찾아 이름을 얻는다.
-                        # 포커스 인덱스에서 위로 올라가며 SessionRow를 찾음
-                        idx = listbox.focus_position
-                        while idx >= 0:
-                            cand = walker[idx]
-                            if isinstance(cand, SessionRow):
-                                result[0] = cand.session_name
-                                break
-                            idx -= 1
-                        raise urwid.ExitMainLoop()
-                # 직접 SessionRow인 경우
-                if isinstance(focus_w, SessionRow):
-                    result[0] = focus_w.session_name
-                    raise urwid.ExitMainLoop()
-
-        palette = self.theme_manager.get_urwid_palette()
-        loop = urwid.MainLoop(listbox, palette=palette, unhandled_input=unhandled)
-        loop.run()
-        self._snap_scroll_to_bottom()
-
-        chosen = result[0]
-        if not chosen:
-            self.console.print("[dim]복원이 취소되었습니다.[/dim]", highlight=False)
-            return
-
-        # 실제 복원 플로우
-        self._restore_flow(chosen)
 
     def _delete_single_snapshot(self, session_name: str) -> Tuple[bool, int]:
         """
@@ -4079,7 +4154,8 @@ class CommandHandler:
             [],
             getattr(self.app, "model", ""),
             getattr(self.app, "model_context", 0),
-            []
+            [],
+            mode=getattr(self.app, "mode", "dev"),
         )
         #    - 현재 작업본 코드 블록 제거
         removed_live_codes = self._remove_session_code_files(sess)
@@ -4454,6 +4530,7 @@ class AIStreamParser:
         self.outer_fence_char: str = "`"
         self.outer_fence_len: int = 0
         self.last_flush_time: float = 0.0
+        self._last_emitted = ""
 
     def _simple_markdown_to_rich(self, text: str) -> str:
         """
@@ -4586,7 +4663,9 @@ class AIStreamParser:
                 chunk = next(stream_iter)
                 if hasattr(chunk, 'usage') and chunk.usage: usage_info = chunk.usage.model_dump()
                 delta = chunk.choices[0].delta if (chunk.choices and chunk.choices[0]) else None
-                
+                # reasoning 단계에서 content를 먼저 버퍼링했는지 추적
+                content_buffered_in_reasoning = False
+
                 # Reasoning 처리
                 if hasattr(delta, 'reasoning') and delta.reasoning:
                     # Live 패널 시작 전, 완성된 줄만 출력하고 조각은 버퍼에 남깁니다.
@@ -4613,6 +4692,7 @@ class AIStreamParser:
                                 self.reasoning_buffer += delta.reasoning
                             elif delta and delta.content: 
                                 self.buffer += delta.content
+                                content_buffered_in_reasoning = True
                                 break
                         except StopIteration: break
                     
@@ -4624,7 +4704,8 @@ class AIStreamParser:
                     continue
                 
                 self.full_reply += delta.content
-                self.buffer += delta.content
+                if not content_buffered_in_reasoning:
+                    self.buffer += delta.content
 
                 if not self.in_code_block and (self._looks_like_start_fragment(self.buffer) or self.buffer.endswith('`')):
                     continue
@@ -4738,20 +4819,20 @@ class AIStreamParser:
     def _is_fence_start_line(line: str) -> Optional[Tuple[str, int, str]]:
         """
         '완전한 한 줄'(개행 제거)에 대해 '줄 시작 펜스'인지 판정(엄격).
-        - ^[ \t]{0,3} (```... | ~~~...) [ \t]* <info_token>? [ \t]*$
+        - ^[ \t]{0,3} (```...) [ \t]* <info_token>? [ \t]*$
         - info_token: 언어 토큰 1개만 허용([A-Za-z0-9_+.\-#]+), 그 뒤에는 공백만 허용
         - 예) '```python'         → 시작으로 인정
             '```python   '      → 시작으로 인정
             '```'               → 시작으로 인정
             '```python 이런식'  → 시작으로 인정하지 않음(설명 문장)
             '문장 중간 ```python' → 시작으로 인정하지 않음(인라인)
-        반환: (fence_char('`' or '~'), fence_len(>=3), info_token or "")
+        반환: (fence_char('`'), fence_len(>=3), info_token or "")
         """
         if line is None:
             return None
         s = line.rstrip("\r")
         # 모든 들여쓰기 허용
-        m = re.match(r'^\s*(?P<fence>(?P<char>`|~){3,})[ \t]*(?P<info>[A-Za-z0-9_+\-.#]*)[ \t]*$', s)
+        m = re.match(r'^\s*(?P<fence>(?P<char>`){3,})[ \t]*(?P<info>[A-Za-z0-9_+\-.#]*)[ \t]*$', s)
         if not m:
             return None
 
@@ -4789,7 +4870,7 @@ class AIStreamParser:
         """
         if not fragment or "\n" in fragment:
             return False
-        return re.match(r'^\s*(`{3,}|~{3,})', fragment) is not None
+        return re.match(r'^\s*(`{3,})', fragment) is not None
 
     @staticmethod
     def _looks_like_close_fragment(fragment: str, fence_char: str, fence_len: int) -> bool:
@@ -4802,34 +4883,12 @@ class AIStreamParser:
         return re.match(rf'^{re.escape(fence_char)}{{{max(3, fence_len)},}}\s*$', s) is not None
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="터미널에서 AI와 대화하는 CLI 도구",
-        formatter_class=argparse.RawTextHelpFormatter
-    )
-    parser.add_argument(
-        "session",
-        nargs="?",
-        default="default",
-        help="사용할 세션의 이름입니다. (기본값: default)"
-    )
-    parser.add_argument(
-        "--mode",
-        choices=["dev", "general", "teacher"],
-        default="dev",
-        help="시작할 시스템 프롬프트 모드입니다. (기본값: dev)"
-    )
-    
-    args = parser.parse_args()
-
     try:
-        # 1. ConfigManager를 먼저 초기화하여 필요한 디렉터리와 파일을 생성합니다.
-        #    (이 로직은 ConfigManager의 __init__ 내부에 이미 구현되어 있습니다.)
-        ConfigManager()
-
-        # 2. GPTCLI 애플리케이션 인스턴스를 생성합니다.
-        app = GPTCLI(session_name=args.session, mode=args.mode)
-        
-        # 3. 애플리케이션의 메인 루프를 실행합니다.
+        cfg = ConfigManager()
+        chosen_session = cfg.load_current_session_name() or "default"
+        sess_data = cfg.load_session(chosen_session)
+        chosen_mode = sess_data.get("mode", "dev")
+        app = GPTCLI(session_name=chosen_session, mode=chosen_mode)
         app.run()
 
     except KeyboardInterrupt:
