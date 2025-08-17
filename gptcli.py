@@ -1306,8 +1306,9 @@ class FileSelector:
                             # [변경] 전역 is_ignored 대신 self.config.is_ignored 사용
                             if self.config.is_ignored(child, self.spec):
                                 continue
-                            if child.suffix.lower() in (*constants.PLAIN_EXTS, *constants.IMG_EXTS, constants.PDF_EXT):
-                                self.items.append((child.resolve(), False))
+                            # 확장자/휴리스틱 필터 제거, ignore만 통과하면 추가
+                            #if child.suffix.lower() in (*constants.PLAIN_EXTS, *constants.IMG_EXTS, constants.PDF_EXT):
+                            self.items.append((child.resolve(), False))
                 except Exception:
                     pass
 
@@ -1326,8 +1327,8 @@ class FileSelector:
                 if entry.is_dir():                                                                   
                     result.update(self.get_all_files_in_dir(entry))                                       
                 elif entry.is_file():                                                                
-                    if entry.suffix.lower() in (*constants.PLAIN_EXTS, *constants.IMG_EXTS, constants.PDF_EXT):                    
-                        result.add(entry.resolve())                                                  
+                    #if entry.suffix.lower() in (*constants.PLAIN_EXTS, *constants.IMG_EXTS, constants.PDF_EXT):                    
+                    result.add(entry.resolve())
         except Exception:                                                                            
             pass                                                                                     
         return result
