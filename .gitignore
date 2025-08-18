@@ -1,6 +1,8 @@
 .env
 __pycache__
-gpt*/
+gpt_codes/
+gpt_markdowns/
+gpt_outputs/
 test*/
 .gpt*
 .gptignore
