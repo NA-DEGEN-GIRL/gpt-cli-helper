@@ -61,17 +61,17 @@ class ConfigManager:
         if self.MODELS_FILE.exists():
             return
         default_ai_models = """
-            anthropic/claude-opus-4.1 200000
-            anthropic/claude-sonnet-4 200000
-            google/gemini-2.5-flash 1048576
-            google/gemini-2.5-pro 1048576
-            openai/gpt-5 400000
-            openai/gpt-5-mini 400000
-            qwen/qwen3-235b-a22b-2507 262144
-            qwen/qwen3-235b-a22b-thinking-2507 262144
-            qwen/qwen3-coder 262144
-            x-ai/grok-4 256000
-        """
+anthropic/claude-opus-4.1 200000
+anthropic/claude-sonnet-4 200000
+google/gemini-2.5-flash 1048576
+google/gemini-2.5-pro 1048576
+openai/gpt-5 400000
+openai/gpt-5-mini 400000
+qwen/qwen3-235b-a22b-2507 262144
+qwen/qwen3-235b-a22b-thinking-2507 262144
+qwen/qwen3-coder 262144
+x-ai/grok-4 256000
+"""
         try:
             self.MODELS_FILE.write_text(default_ai_models.strip(), encoding="utf-8")
         except Exception as e:
@@ -83,32 +83,33 @@ class ConfigManager:
             return
 
         default_patterns = """
-            # 이 파일은 모든 프로젝트에 공통으로 적용되는 전역 gptcli 무시 규칙입니다.
-            # 사용자가 자유롭게 수정할 수 있습니다.
+# 이 파일은 모든 프로젝트에 공통으로 적용되는 전역 gptcli 무시 규칙입니다.
+# 사용자가 자유롭게 수정할 수 있습니다.
 
-            # --- 일반적인 무시 목록 ---
-            .DS_Store
-            .env
-            *.pyc
-            *.swp
+# --- 일반적인 무시 목록 ---
+.DS_Store
+.env
+*.pyc
+*.swp
 
-            # --- Python 관련 ---
-            __pycache__/
-            .venv/
-            venv/
-            env/
+# --- Python 관련 ---
+__pycache__/
+.venv/
+venv/
+env/
 
-            # --- 버전 관리 및 IDE 설정 ---
-            .git/
-            .vscode/
-            .idea/
+# --- 버전 관리 및 IDE 설정 ---
+.git/
+.vscode/
+.idea/
 
-            # --- 이 앱 자체의 파일들 ---
-            .gpt_sessions/
-            .gpt_prompt_history.txt
-            .gpt_favorites.json
-            .gptignore
-            """
+# --- 이 앱 자체의 파일들 ---
+.gpt_sessions/
+.gpt_prompt_history.txt
+.gpt_favorites.json
+.gptignore
+__init__.py
+"""
         try:
             self.DEFAULT_IGNORE_FILE.write_text(default_patterns.strip(), encoding="utf-8")
         except Exception as e:

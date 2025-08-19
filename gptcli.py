@@ -11,7 +11,7 @@ import time
 import subprocess
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Set, Union
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 # ── 3rd-party
 import pyperclip
@@ -21,8 +21,7 @@ from openai import OpenAI
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.completion import Completer, PathCompleter, WordCompleter, FuzzyCompleter, Completion
-from prompt_toolkit.document import Document
+from prompt_toolkit.completion import PathCompleter, WordCompleter, FuzzyCompleter
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.application.current import get_app
@@ -35,13 +34,14 @@ from rich.box import ROUNDED
 
 # ── local
 import src.constants as constants
+from src.gptcli.core.commands import CommandRouter, SimpleCallbackCommand
 from src.gptcli.services.config import ConfigManager
 from src.gptcli.services.theme import ThemeManager
 from src.gptcli.services.tokens import TokenEstimator
 from src.gptcli.services.ai_stream import AIStreamParser
-from src.gptcli.ui.completion import PathCompleterWrapper, AttachedFileCompleter, ConditionalCompleter
+from src.gptcli.ui.completion import PathCompleterWrapper, ConditionalCompleter
 from src.gptcli.ui.file_selector import FileSelector
-from src.gptcli.ui.diff_view import DiffListBox, CodeDiffer
+from src.gptcli.ui.diff_view import CodeDiffer
 from src.gptcli.models.model_searcher import ModelSearcher
 from src.gptcli.utils.common import Utils
 
@@ -74,6 +74,9 @@ class GPTCLI:
         self.command_handler = CommandHandler(self, self.config)
         self.token_estimator = TokenEstimator(console=self.console)
         
+        self.router = CommandRouter(self.console.print)
+        self._register_commands()
+
         # --- 애플리케이션 상태 변수 ---
         self.current_session_name: str = session_name
         self.mode: str = mode
@@ -100,6 +103,58 @@ class GPTCLI:
             self.config.save_current_session_name(self.current_session_name)
         except Exception:
             pass
+
+    def _register_commands(self) -> None:
+        """
+        CommandRouter에 기존 CommandHandler 메서드를 래핑해 등록합니다.
+        반환값 True를 주는 명령(예: /exit)은 메인 루프를 종료합니다.
+        """
+        h = self.command_handler
+
+        def reg(name: str, fn):
+            # 주의: late-binding 방지 위해 기본 인자에 fn 바인딩
+            self.router.register(
+                SimpleCallbackCommand(name, lambda args, _fn=fn: _fn(args))
+            )
+
+        # 종료
+        reg("exit", h.handle_exit)
+
+        # 모드/테마/출력
+        reg("compact_mode", h.handle_compact_mode)
+        reg("pretty_print", h.handle_pretty_print)
+        reg("mode", h.handle_mode)
+        reg("theme", h.handle_theme)
+
+        # 모델
+        reg("select_model", h.handle_select_model)
+        reg("search_models", h.handle_search_models)
+
+        # 파일/TUI/디프
+        reg("all_files", h.handle_all_files)
+        reg("files", h.handle_files)
+        reg("clearfiles", h.handle_clearfiles)
+        reg("diff_code", h.handle_diff_code)
+
+        # 세션/백업/초기화
+        reg("session", h.handle_session)
+        reg("backup", h.handle_backup)
+        reg("reset", h.handle_reset)
+
+        # 즐겨찾기
+        reg("savefav", h.handle_savefav)
+        reg("usefav", h.handle_usefav)
+        reg("favs", h.handle_favs)
+
+        # 최근 응답/보기/복사
+        reg("last_response", h.handle_last_response)
+        reg("raw", h.handle_raw)
+        reg("copy", h.handle_copy)
+
+        # 기타
+        reg("commands", h.handle_commands)
+        reg("show_context", h.handle_show_context)
+        reg("edit", h.handle_edit)
 
     def _setup_prompt_session(self) -> PromptSession:
         command_list = [cmd.split()[0] for cmd in constants.COMMANDS.strip().split('\n')]
@@ -354,7 +409,8 @@ class GPTCLI:
                     continue
 
                 if user_input.startswith('/'):
-                    should_exit = self.command_handler.dispatch(user_input)
+                    #should_exit = self.command_handler.dispatch(user_input)
+                    should_exit = self.router.dispatch(user_input)
                     if should_exit:
                         break
                 else:
