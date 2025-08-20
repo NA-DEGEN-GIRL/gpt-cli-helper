@@ -5,8 +5,8 @@ prompt-toolkit
 pyperclip
 pathspec
 tiktoken
-pypdf2
-pillow
+Pypdf2
+Pillow
 requests
 pygments
 python-dotenv

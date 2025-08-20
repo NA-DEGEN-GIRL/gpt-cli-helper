@@ -6,7 +6,8 @@ from PIL import Image
 import PyPDF2
 import tiktoken
 from rich.console import Console
-import src.constants as constants
+#import src.constants as constants
+
 class TokenEstimator:
     def __init__(self, console: Console, model: str = "gpt-4"):
         """

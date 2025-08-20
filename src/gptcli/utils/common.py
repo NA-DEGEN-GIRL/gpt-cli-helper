@@ -99,9 +99,6 @@ class Utils:
                 # base64 인코딩
                 return base64.b64encode(buffer.getvalue()).decode('utf-8')
                 
-        except ImportError:
-            console.print("[yellow]Pillow가 설치되지 않아 이미지 최적화를 건너뜁니다. (pip install Pillow)[/yellow]")
-            return Utils._encode_base64(path)
         except Exception as e:
             console.print(f"[yellow]이미지 최적화 실패 ({path.name}): {e}[/yellow]")
             return Utils._encode_base64(path)
@@ -216,7 +213,7 @@ class Utils:
     ) -> List[Dict[str, Any]]:
         """컨텍스트 한계에 맞춰 메시지 목록을 트리밍"""
         te = token_estimator
-        trim_ratio = constants.CONTEXT_TRIM_RATIO
+        trim_ratio = float(trim_ratio) if trim_ratio is not None else float(constants.CONTEXT_TRIM_RATIO)
 
         sys_tokens = te.count_text_tokens(system_prompt_text or "")
         if sys_tokens >= model_context_limit:

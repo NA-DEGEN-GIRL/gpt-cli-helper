@@ -717,7 +717,6 @@ class CodeDiffer:
         return urwid.Text(parts, wrap='clip')
 
     def _show_diff_view(self):
-        import re
         if len(self.selected_for_diff) != 2:
             return
 

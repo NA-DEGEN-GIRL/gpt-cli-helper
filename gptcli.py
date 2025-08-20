@@ -39,6 +39,7 @@ from src.gptcli.services.config import ConfigManager
 from src.gptcli.services.theme import ThemeManager
 from src.gptcli.services.tokens import TokenEstimator
 from src.gptcli.services.ai_stream import AIStreamParser
+from src.gptcli.services.sessions import SessionService
 from src.gptcli.ui.completion import PathCompleterWrapper, ConditionalCompleter
 from src.gptcli.ui.file_selector import FileSelector
 from src.gptcli.ui.diff_view import CodeDiffer
@@ -71,8 +72,9 @@ class GPTCLI:
         )
         
         self.parser = AIStreamParser(self.client, self.console)
-        self.command_handler = CommandHandler(self, self.config)
         self.token_estimator = TokenEstimator(console=self.console)
+        self.sessions = SessionService(self.config, self.console)
+        self.command_handler = CommandHandler(self, self.config, self.sessions)
         
         self.router = CommandRouter(self.console.print)
         self._register_commands()
@@ -288,7 +290,8 @@ class GPTCLI:
 
     def _get_prompt_string(self) -> str:
         """현재 상태를 기반으로 터미널 프롬프트 문자열을 생성합니다."""
-        parts = [self.model.split('/')[1], f"session: {self.current_session_name}", f"mode: {self.mode}"]
+        model_disp = self.model.split('/', 1)[-1] if isinstance(self.model, str) else str(self.model)
+        parts = [model_disp, f"session: {self.current_session_name}", f"mode: {self.mode}"]
         if self.attached:
             parts.append(f"{len(self.attached)} files")
         if self.compact_mode:
@@ -442,7 +445,7 @@ class CommandHandler:
     '/'로 시작하는 모든 명령어를 처리하는 전담 클래스.
     메인 애플리케이션(GPTCLI)의 인스턴스를 주입받아 그 상태에 접근하고 수정합니다.
     """
-    def __init__(self, app: 'GPTCLI', config: 'ConfigManager'):
+    def __init__(self, app: 'GPTCLI', config: 'ConfigManager', sessions: 'SessionService'):
         """
         Args:
             app ('GPTCLI'): 메인 애플리케이션 인스턴스.
@@ -452,173 +455,18 @@ class CommandHandler:
         self.console = self.app.console
         self.config = config
         self.theme_manager = app.theme_manager
+        self.sessions = sessions
         self.differ_ref: Dict[str, CodeDiffer | None] = {"inst": None}
 
-    def _backup_root_dir(self) -> Path:
-        """
-        세션 백업 루트(.gpt_sessions/backups) 경로.
-        프로젝트에 SESSION_BACKUP_DIR 속성이 있으면 그것을, 없으면 기본값을 사용합니다.
-        """
-        root = getattr(self.config, "SESSION_BACKUP_DIR", None)
-        if root is None:
-            root = Path(self.config.SESSION_DIR) / "backups"
-        root = Path(root)
-        root.mkdir(parents=True, exist_ok=True)
-        return root
-
-    def _slug(self, session_name: str) -> str:
-        """
-        파일/디렉터리 안전 슬러그. 대소문자 유지, [A-Za-z0-9._-] 외는 '_'로 치환.
-        브라우저 생태계에서도 세션명과 파일명이 다를 수 있음을 감안(특수문자) [forum.vivaldi.net].
-        """
-        s = re.sub(r"[^A-Za-z0-9._-]+", "_", session_name.strip())
-        s = re.sub(r"_+", "_", s).strip("._-")
-        return s or "default"
-
-    def _single_backup_json(self, session_name: str) -> Path:
-        """
-        세션별 단일 스냅샷 파일 경로: backups/session_<slug>.json
-        (요구사항: session_<name>.json 형태)
-        """
-        slug = self._slug(session_name)
-        return self._backup_root_dir() / f"session_{slug}.json"
-
-    def _code_single_backup_dir(self, session_name: str) -> Path:
-        """
-        코드 스냅샷 디렉터리: gpt_codes/backup/<slug>/
-        """
-        slug = self._slug(session_name)
-        return (self.config.CODE_OUTPUT_DIR / "backup" / slug).resolve()
-
-    # --- 코드 파일 스냅샷/복원 ---
-
-    def _remove_session_code_files(self, session_name: str) -> int:
-        """
-        gpt_codes 내 현재 작업본(codeblock_<session>_*) 삭제
-        """
-        removed = 0
-        pattern = f"codeblock_{session_name}_*"
-        for f in self.config.CODE_OUTPUT_DIR.glob(pattern):
-            try:
-                f.unlink()
-                removed += 1
-            except Exception:
-                pass
-        if removed:
-            self.console.print(f"[dim]코드 블록 삭제: {pattern} ({removed}개)[/dim]", highlight=False)
-        return removed
-
-    def _copy_code_snapshot_single(self, session_name: str) -> int:
-        """
-        gpt_codes/codeblock_<session>_* → gpt_codes/backup/<slug>/ 로 '단일 스냅샷' 복사(덮어쓰기)
-        """
-        src_files = list(self.config.CODE_OUTPUT_DIR.glob(f"codeblock_{session_name}_*"))
-        dst_dir = self._code_single_backup_dir(session_name)
-        if dst_dir.exists():
-            shutil.rmtree(dst_dir, ignore_errors=True)
-        copied = 0
-        if src_files:
-            dst_dir.mkdir(parents=True, exist_ok=True)
-            for f in src_files:
-                try:
-                    shutil.copy2(str(f), str(dst_dir / f.name))
-                    copied += 1
-                except Exception:
-                    pass
-        return copied
-
-    def _restore_code_snapshot_single(self, session_name: str) -> Tuple[int, int]:
-        """
-        gpt_codes/backup/<slug>/ → gpt_codes 로 복원
-        - 기존 codeblock_<session>_* 삭제 후 복사
-        반환: (removed, copied)
-        """
-        removed = self._remove_session_code_files(session_name)
-        src_dir = self._code_single_backup_dir(session_name)
-        copied = 0
-        if src_dir.exists() and src_dir.is_dir():
-            for f in src_dir.glob("*"):
-                try:
-                    shutil.copy2(str(f), str(self.config.CODE_OUTPUT_DIR / f.name))
-                    copied += 1
-                except Exception:
-                    pass
-        return removed, copied
-
-    def _delete_session_file(self, session_name: str) -> bool:
-        """
-        .gpt_sessions/session_<name>.json 파일을 삭제합니다.
-        - 세션 전환/복원 전에 호출하여 '활성 세션 하나만' 남도록 정리.
-        """
-        path = self.config.get_session_path(session_name)
-        try:
-            if path.exists():
-                path.unlink()
-                self.console.print(
-                    f"[dim]세션 파일 삭제: {path.relative_to(self.config.BASE_DIR)}[/dim]",
-                    highlight=False
-                )
-                return True
-        except Exception as e:
-            self.console.print(
-                f"[yellow]세션 파일 삭제 실패({path.name}): {e}[/yellow]",
-                highlight=False
-            )
-        return False
-
-    # --- 세션 단일 스냅샷/복원 ---
-
-    def _snapshot_session_single(self, session_name: str, reason: str = "manual") -> bool:
-        """
-        세션별 '단일' 스냅샷 생성(덮어쓰기)
-        - 세션 JSON: backups/session_<slug>.json
-        - 코드 스냅샷: gpt_codes/backup/<slug>/ (codeblock_*만)
-        """
-        try:
-            # 현재 세션이면 디스크에 먼저 flush
-            if hasattr(self.app, "current_session_name") and session_name == self.app.current_session_name:
-                # 기존 프로젝트의 save_session 시그니처에 맞춰 호출
-                self.config.save_session(
-                    session_name,
-                    getattr(self.app, "messages", []),
-                    getattr(self.app, "model", ""),
-                    getattr(self.app, "model_context", 0),
-                    getattr(self.app, "usage_history", []),
-                    mode=getattr(self.app, "mode", "dev"),
-                )
-
-            # 세션 JSON 로드 → backup_meta 추가 → 단일 스냅샷으로 저장
-            data = self.config.load_session(session_name)
-            data = dict(data)
-            data.setdefault("name", session_name)
-            data["backup_meta"] = {
-                "session": session_name,  # 원본 세션명 저장
-                "backup_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "reason": reason,
-                "message_count": len(data.get("messages", [])),
-                "model": data.get("model", getattr(self.app, "model", "")),
-            }
-
-            bj = self._single_backup_json(session_name)
-            bj.parent.mkdir(parents=True, exist_ok=True)
-
-            # Utils가 프로젝트에 존재한다는 가정(기존 코드와 동일 사용)
-            if hasattr(self, "Utils"):
-                self.Utils._save_json(bj, data)
-            else:
-                bj.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-            code_cnt = self._copy_code_snapshot_single(session_name)
-            if hasattr(self, "console"):
-                self.console.print(
-                    f"[green]스냅샷 저장:[/green] session='{session_name}' (codes:{code_cnt}) → {bj}",
-                    highlight=False
-                )
-            return True
-        except Exception as e:
-            if hasattr(self, "console"):
-                self.console.print(f"[yellow]스냅샷 실패(session={session_name}): {e}[/yellow]", highlight=False)
-            return False
+    def _app_state(self) -> Dict[str, Any]:  # [추가]
+        return {
+            "current_session_name": getattr(self.app, "current_session_name", "default"),
+            "messages": getattr(self.app, "messages", []),
+            "model": getattr(self.app, "model", ""),
+            "model_context": getattr(self.app, "model_context", 0),
+            "usage_history": getattr(self.app, "usage_history", []),
+            "mode": getattr(self.app, "mode", "dev"),
+        }
 
     def _load_session_into_app(self, session_name: str) -> None:
         """
@@ -633,71 +481,10 @@ class CommandHandler:
         self.app.model_context = data.get("context_length", getattr(self.app, "default_context_length", self.app.model_context))
         self.app.usage_history = data.get("usage_history", [])
         self.app.mode = data.get("mode", getattr(self.app, "mode", "dev"))
-
-    def _restore_session_single(self, session_name: str) -> Optional[Dict[str, Any]]:
-        """
-        세션별 '단일' 스냅샷에서 복원하고, 성공 시 세션 데이터를 반환합니다.
-        - 세션 JSON: backups/session_<slug>.json → 실제 세션 파일로 저장
-        - 코드: gpt_codes/backup/<slug>/ → gpt_codes 로 복사
-        - [변경] 앱 상태를 직접 수정하지 않고, 로드된 데이터를 반환합니다.
-        """
-        bj = self._single_backup_json(session_name)
-        if not bj.exists():
-            if hasattr(self, "console"):
-                self.console.print(f"[yellow]스냅샷을 찾을 수 없습니다: {bj}[/yellow]", highlight=False)
-            return None
-
-        try:
-            if hasattr(self, "Utils"):
-                data = self.Utils._load_json(bj, {})
-            else:
-                data = json.loads(bj.read_text(encoding="utf-8"))
-
-            msgs = data.get("messages", [])
-            model = data.get("model", getattr(self.app, "model", ""))
-            ctx = data.get("context_length", getattr(self.app, "model_context", 0))
-            usage = data.get("usage_history", [])
-            mode = data.get("mode")
-
-            # 1. 파일 시스템 작업: 세션 파일로 쓰기
-            self.config.save_session(session_name, msgs, model, ctx, usage, mode=mode)
-
-            # 2. 파일 시스템 작업: 코드 파일 복원
-            removed, copied = self._restore_code_snapshot_single(session_name)
-            
-            if hasattr(self, "console"):
-                self.console.print(
-                    f"[green]복원 완료:[/green] session='{session_name}' (codes: -{removed} +{copied})",
-                    highlight=False
-                )
-            
-            # 3. [변경] 성공적으로 파일 I/O를 마친 후, 로드된 데이터를 반환
-            return data
-            
-        except Exception as e:
-            if hasattr(self, "console"):
-                self.console.print(f"[red]복원 실패(session={session_name}): {e}[/red]", highlight=False)
-            return None
-
-    def dispatch(self, user_input: str) -> bool:
-        """
-        사용자 입력을 파싱하여 적절한 핸들러 메서드로 전달합니다.
-        애플리케이션을 종료해야 할 경우 True를 반환합니다.
-        """
-        if not user_input.startswith('/'):
-            return False
-
-        cmd_str, *args = user_input.strip().split()
-        cmd_name = cmd_str[1:]
-
-        handler_method = getattr(self, f"handle_{cmd_name}", self.handle_unknown)
-        return handler_method(args) or False
-
+    
     def handle_unknown(self, args: List[str]) -> None:
         self.console.print("[yellow]알 수 없는 명령어입니다. '/commands'로 전체 목록을 확인하세요.[/yellow]",highlight=False)
-
-    # --- 애플리케이션 및 모드 제어 ---
-
+    
     def handle_exit(self, args: List[str]) -> bool:
         """애플리케이션을 종료합니다."""
         return True
@@ -761,7 +548,7 @@ class CommandHandler:
             return None
 
         def _backup_json_for(name: str) -> Path:
-            return self._single_backup_json(name)
+            return self.sessions.get_backup_json_path(name)
 
         def _live_json_for(name: str) -> Path:
             return self.config.get_session_path(name)
@@ -861,7 +648,6 @@ class CommandHandler:
         self._snap_scroll_to_bottom()
         return chosen[0]
 
-
     def handle_session(self, args: List[str]) -> None:
         """
         세션 전환(단일 스냅샷 정책, 통합 엔트리)
@@ -883,59 +669,51 @@ class CommandHandler:
         if current and target == current:
             self.console.print(f"[dim]이미 현재 세션입니다: '{target}'[/dim]", highlight=False)
             return
-
+        
         # 1) 현재 세션 스냅샷 → 성공 시 live/코드 삭제
         if current:
-            ok = self._snapshot_session_single(current, reason="switch_session")
+            ok = self.sessions.snapshot_single(current, self._app_state(), reason="switch_session")  # [변경]
             if ok:
-                self._delete_session_file(current)
-                self._remove_session_code_files(current)
+                self.sessions.delete_live_session_file(current)   # [변경]
+                self.sessions.remove_session_code_files(current)  # [변경]
             else:
                 self.console.print(
                     "[yellow]경고: 스냅샷 실패로 live/코드 파일을 삭제하지 않았습니다.[/yellow]",
                     highlight=False
                 )
 
-        # 2) 타깃 세션 전환(스냅샷 우선)
-        if self._single_backup_json(target).exists():
-            if self._restore_session_single(target):
-                # [중요] 복원 후 앱 상태/포인터 갱신
-                self._load_session_into_app(target)  # ← 핵심
+        # 2) 대상 복원(스냅샷 우선)
+        if self.sessions.has_backup(target):
+            if self.sessions.restore_single(target):
+                self._load_session_into_app(target)
                 try:
                     self.config.save_current_session_name(self.app.current_session_name)
                 except Exception:
                     pass
-                self.console.print(
-                    f"[green]세션 전환 완료 → '{target}' (스냅샷 복원)[/green]",
-                    highlight=False
-                )
+                self.console.print(f"[green]세션 전환 완료 → '{target}' (스냅샷 복원)[/green]", highlight=False)
             else:
-                # 손상 시 라이브로 폴백(있다면)
                 tpath = self.config.get_session_path(target)
                 if tpath.exists():
                     self._load_session_into_app(target)
-                    self._snapshot_session_single(target, reason="migrate-live-to-snapshot")
+                    self.sessions.snapshot_single(target, self._app_state(), reason="migrate-live-to-snapshot")  # [변경]
                     self.console.print(
-                        f"[yellow]스냅샷 손상 → live 로드 후 스냅샷 생성: '{target}'[/yellow]",
-                        highlight=False
+                        f"[yellow]스냅샷 손상 → live 로드 후 스냅샷 생성: '{target}'[/yellow]", highlight=False
                     )
                 else:
                     self.config.save_session(target, [], self.app.default_model, self.app.default_context_length, [],
                                              mode=getattr(self.app, "mode", "dev"))
                     self._load_session_into_app(target)
                     self.console.print(
-                        f"[yellow]스냅샷 손상 → 빈 세션 생성: '{target}'[/yellow]",
-                        highlight=False
+                        f"[yellow]스냅샷 손상 → 빈 세션 생성: '{target}'[/yellow]", highlight=False
                     )
         else:
-            # 스냅샷이 없으면 라이브 있는지 확인
+            # 스냅샷 없음 → 라이브 확인
             tpath = self.config.get_session_path(target)
             if tpath.exists():
                 self._load_session_into_app(target)
-                self._snapshot_session_single(target, reason="migrate-live-to-snapshot")
+                self.sessions.snapshot_single(target, self._app_state(), reason="migrate-live-to-snapshot")  # [변경]
                 self.console.print(
-                    f"[green]세션 전환 완료 → '{target}' (live 로드·스냅샷 생성)[/green]",
-                    highlight=False
+                    f"[green]세션 전환 완료 → '{target}' (live 로드·스냅샷 생성)[/green]", highlight=False
                 )
             else:
                 self.config.save_session(
@@ -943,10 +721,7 @@ class CommandHandler:
                     mode=getattr(self.app, "mode", "dev"),
                 )
                 self._load_session_into_app(target)
-                self.console.print(
-                    f"[green]새 세션 생성 → '{target}'[/green]",
-                    highlight=False
-                )
+                self.console.print(f"[green]새 세션 생성 → '{target}'[/green]", highlight=False)
 
         # 3) 첨부 초기화
         if getattr(self.app, "attached", None):
@@ -958,17 +733,14 @@ class CommandHandler:
             self.config.save_current_session_name(getattr(self.app, "current_session_name", target))
         except Exception:
             pass
-    
+
     def handle_backup(self, args: List[str]) -> None:
-        """
-        현재 세션 단일 스냅샷 저장(덮어쓰기)
-        사용법: /backup [reason...]
-        """
         reason = "manual"
         if args:
             reason = " ".join(args).strip() or "manual"
-        ok = self._snapshot_session_single(getattr(self.app, "current_session_name", "default"), reason=reason)
-        if ok and hasattr(self, "console"):
+        sess = getattr(self.app, "current_session_name", "default")
+        ok = self.sessions.snapshot_single(sess, self._app_state(), reason=reason)  # [변경]
+        if ok:
             self.console.print("[green]BACKUP OK (단일 스냅샷 갱신)[/green]", highlight=False)
 
     def _select_model(self, current_model: str, current_context: int) -> Tuple[str, int]:
@@ -1109,8 +881,6 @@ class CommandHandler:
                 self.theme_manager.apply_to_urwid_loop(self.app.active_tui_loop)
         except KeyError:
             self.console.print(f"[red]알 수 없는 테마: {theme_name}[/red]", highlight=False)
-
-    # --- 입출력 및 파일 관리 ---
 
     def handle_edit(self, args: List[str]) -> None:
         """
@@ -1337,150 +1107,6 @@ class CommandHandler:
         self.differ_ref["inst"] = None
         self._snap_scroll_to_bottom()
 
-    # --- 세션 및 즐겨찾기 관리 ---
-
-    def _backup_current_session(self, session_name: str) -> bool:
-        """지정된 세션과 관련 코드 파일들을 안전하게 백업합니다."""
-        session_path = self.config.get_session_path(session_name)
-        
-        # 백업할 세션 파일이 존재하고, 내용이 비어있지 않은 경우에만 진행
-        if not session_path.exists() or session_path.stat().st_size == 0:
-            return False
-
-        backup_dir = self.config.SESSION_DIR / "backup"
-        backup_dir.mkdir(exist_ok=True)
-        code_files_backed_up = []
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-
-        # 세션 파일 백업
-        backup_path = backup_dir / f"session_{session_name}_{timestamp}.json"
-        shutil.move(str(session_path), str(backup_path))
-        self.console.print(f"[green]세션 백업: {backup_path.relative_to(self.config.BASE_DIR)}[/green]", highlight=False)
-    
-        # 관련 코드 블록 파일들 백업
-        code_backup_dir = self.config.CODE_OUTPUT_DIR / "backup" / f"{session_name}_{timestamp}"
-        matching_files = list(self.config.CODE_OUTPUT_DIR.glob(f"codeblock_{session_name}_*"))
-        
-        if matching_files:
-            code_backup_dir.mkdir(parents=True, exist_ok=True)
-            for code_file in matching_files:
-                try:
-                    shutil.move(str(code_file), str(code_backup_dir / code_file.name))
-                    code_files_backed_up.append(code_file.name)
-                except Exception as e:
-                    self.console.print(f"[yellow]코드 파일 백업 실패 ({code_file.name}): {e}[/yellow]", highlight=False)
-
-            self.console.print(f"[green]코드 파일 {len(matching_files)}개 백업: {code_backup_dir.relative_to(self.config.BASE_DIR)}[/green]", highlight=False)
-        
-        if code_files_backed_up:
-            backup_info = []
-            
-            code_display_path = code_backup_dir.relative_to(self.config.BASE_DIR)
-            backup_info.append(
-                f"[green]코드 파일 {len(code_files_backed_up)}개:[/green]\n  {code_display_path}/"
-            )
-            
-            # 백업된 파일 목록 표시 (최대 5개)
-            for i, filename in enumerate(code_files_backed_up[:5]):
-                backup_info.append(f"    • {filename}")
-            if len(code_files_backed_up) > 5:
-                backup_info.append(f"    ... 외 {len(code_files_backed_up) - 5}개")
-            
-            self.console.print(
-                Panel(
-                    f"세션 '{session_name}'이 초기화되었습니다.\n\n"
-                    f"[bold]백업 위치:[/bold]\n" + "\n".join(backup_info),
-                    title="[yellow]✅ 세션 초기화 및 백업 완료[/yellow]",
-                    border_style="green"
-                )
-                , highlight=False
-            )
-
-        return True
-
-    def _restore_flow(self, session_name: str) -> None:
-        """
-        공통 복원 플로우(현재 세션 스냅샷→정리→대상 복원)를 수행.
-        단, '현재 세션 == 복원 대상'일 때는 사전 스냅샷을 건너뛰어
-        단일 백업 슬롯을 덮어쓰는 일을 방지한다.
-        """
-        cur = getattr(self.app, "current_session_name", None)
-
-        # 현재와 대상이 다를 때만 pre-restore 스냅샷 시행
-        if cur and cur != session_name:
-            ok = self._snapshot_session_single(cur, reason="pre-restore")
-            if ok:
-                self._delete_session_file(cur)
-                self._remove_session_code_files(cur)
-            else:
-                self.console.print(
-                    "[yellow]경고: 스냅샷 실패로 live/코드 파일을 삭제하지 않았습니다.[/yellow]",
-                    highlight=False
-                )
-                # [안전장치] 스냅샷 실패 시, 복원 프로세스를 중단하여 데이터 유실 방지
-                self.console.print("[red]안전을 위해 복원 작업을 중단합니다.[/red]", highlight=False)
-                return
-        elif cur and cur == session_name:
-            # 동일 세션 복원 시에는 스냅샷 생략(백업 보호)
-            self.console.print(
-                "[dim]같은 세션으로 복원: 사전 스냅샷을 건너뜁니다(백업 보호).[/dim]",
-                highlight=False
-            )
-
-        # [변경] 1. 모든 파일 I/O를 먼저 수행하고 결과 데이터를 받음
-        restored_data = self._restore_session_single(session_name)
-
-        # [변경] 2. 파일 작업이 성공했을 때만 앱의 메모리 상태를 갱신
-        if restored_data:
-            self._load_session_into_app(session_name)
-            # load_session_into_app은 파일에서 다시 읽으므로, restored_data를 직접 넘길 필요는 없음
-            try:
-                self.config.save_current_session_name(session_name)
-            except Exception:
-                pass
-            self.console.print(
-                f"[green]세션 전환 완료 → '{session_name}'[/green]",
-                highlight=False
-            )
-        else:
-            self.console.print(
-                f"[red]복원 실패: 대상 스냅샷을 찾을 수 없거나 읽기 실패[/red]",
-                highlight=False
-            )
-
-    def _delete_single_snapshot(self, session_name: str) -> Tuple[bool, int]:
-        """
-        단일 스냅샷(세션+코드 백업)을 삭제합니다.
-        - 세션 스냅샷 JSON: .gpt_sessions/backups/session_<slug>.json
-        - 코드 스냅샷 디렉터리: gpt_codes/backup/<slug>/
-        반환: (json_deleted, code_files_removed)
-        """
-        json_deleted = False
-        code_removed = 0
-
-        # 세션 스냅샷 JSON
-        bj = self._single_backup_json(session_name)
-        try:
-            if bj.exists():
-                bj.unlink()
-                json_deleted = True
-                self.console.print(f"[dim]스냅샷 JSON 삭제: {bj.relative_to(self.config.BASE_DIR)}[/dim]", highlight=False)
-        except Exception as e:
-            self.console.print(f"[yellow]스냅샷 JSON 삭제 실패({bj.name}): {e}[/yellow]", highlight=False)
-
-        # 코드 스냅샷 디렉터리
-        code_snap_dir = self._code_single_backup_dir(session_name)
-        if code_snap_dir.exists() and code_snap_dir.is_dir():
-            try:
-                # 제거할 파일 개수 계산
-                code_removed = sum(1 for _ in code_snap_dir.glob("**/*") if _.is_file())
-                shutil.rmtree(code_snap_dir, ignore_errors=True)
-                self.console.print(f"[dim]코드 스냅샷 삭제: {code_snap_dir.relative_to(self.config.BASE_DIR)} ({code_removed}개)[/dim]", highlight=False)
-            except Exception as e:
-                self.console.print(f"[yellow]코드 스냅샷 삭제 실패({code_snap_dir.name}): {e}[/yellow]", highlight=False)
-
-        return json_deleted, code_removed
-
     def handle_reset(self, args: List[str]) -> None:
         """
         세션 초기화(옵션형)
@@ -1497,28 +1123,23 @@ class CommandHandler:
         hard = "--hard" in args
         no_snapshot = "--no-snapshot" in args
 
-        # 1) 스냅샷(soft 기본) 또는 hard/no-snapshot 분기
         if hard:
-            # 하드 리셋: 스냅샷 생성하지 않고, 기존 스냅샷도 삭제
-            js_del, code_del = self._delete_single_snapshot(sess)
+            js_del, code_del = self.sessions.delete_single_snapshot(sess)  # [변경]
             self.console.print(
                 f"[yellow]하드 리셋: 기존 스냅샷 제거(JSON:{'O' if js_del else 'X'}, code:{code_del}개)[/yellow]",
                 highlight=False
             )
         elif not no_snapshot:
-            # soft: 리셋 직전 상태 스냅샷(되돌리기용 안전망)
-            ok = self._snapshot_session_single(sess, reason="reset")
+            ok = self.sessions.snapshot_single(sess, self._app_state(), reason="reset")  # [변경]
             if not ok:
                 self.console.print(
                     "[yellow]경고: 스냅샷 실패(/restore로 되돌리기 불가할 수 있음). 초기화를 계속합니다.[/yellow]",
                     highlight=False
                 )
 
-        # 2) 라이브(메모리+파일) 초기화
-        #    - 메시지/사용량 초기화
+        # 라이브 초기화
         self.app.messages = []
         self.app.usage_history = []
-        #    - 세션 파일(라이브) 초기화 저장
         self.config.save_session(
             sess,
             [],
@@ -1527,14 +1148,11 @@ class CommandHandler:
             [],
             mode=getattr(self.app, "mode", "dev"),
         )
-        #    - 현재 작업본 코드 블록 제거
-        removed_live_codes = self._remove_session_code_files(sess)
+        removed_live_codes = self.sessions.remove_session_code_files(sess)     # [변경]
 
-        # 3) 결과 출력
         mode_str = "HARD" if hard else ("NO-SNAPSHOT" if no_snapshot else "SOFT")
         self.console.print(
-            f"[green]세션 '{sess}' 초기화 완료[/green] "
-            f"(mode: {mode_str}, codes removed: {removed_live_codes})",
+            f"[green]세션 '{sess}' 초기화 완료[/green] (mode: {mode_str}, codes removed: {removed_live_codes})",
             highlight=False
         )
 

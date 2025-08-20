@@ -1,11 +1,10 @@
 # src/gptcli/core/types.py
 from __future__ import annotations
-from typing import Any, Dict, List, Protocol, TypedDict, runtime_checkable
+from typing import Any, Dict, List, TypedDict
 
 # ─────────────────────────────────────────────────────────────
 # Chat API 호환 콘텐츠 파트(텍스트/이미지/PDF 등)를 위한 TypedDict 정의
 # ─────────────────────────────────────────────────────────────
-
 class ContentText(TypedDict, total=False):
     type: str          # "text"
     text: str
