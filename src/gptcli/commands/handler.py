@@ -423,13 +423,14 @@ class CommandHandler:
             # [선택안] 줄바꿈이 화면에 보이는 것이 싫다면: 커서를 위로 1줄 되돌린다.
             # - 스크롤은 유지되면서, 빈 줄이 “보이는” 효과를 최소화.
             # - ANSI: CSI 1A (커서 위로 1줄), 여기선 원시 ANSI를 직접 기록.
+            
             if getattr(self.console, "is_terminal", False):
                 try:
                     self.console.file.write("\x1b[1A")  # [선택 포인트]
                     self.console.file.flush()
                 except Exception:
                     pass
-
+            
         except Exception:
             pass
 
