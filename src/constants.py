@@ -5,8 +5,8 @@ from typing import Dict, List, Set
 DEFAULT_MODEL: str = "google/gemini-2.5-pro"
 DEFAULT_CONTEXT_LENGTH: int = 1048576
 SUPPORTED_MODES: List[str] = ["dev", "general", "teacher"]
-CONTEXT_TRIM_RATIO: float = 0.75
-VENDOR_SPECIFIC_OFFSET = { "anthropic": 4000, "google": 2000, "openai": 1000 }
+CONTEXT_TRIM_RATIO: float = 0.7
+VENDOR_SPECIFIC_OFFSET = { "anthropic": 50_000, "google": 2000, "openai": 1000 }
 
 API_URL: str = "https://openrouter.ai/api/v1/models"
 
