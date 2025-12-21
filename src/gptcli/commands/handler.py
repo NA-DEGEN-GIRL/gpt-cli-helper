@@ -441,6 +441,7 @@ class CommandHandler:
         if new_model != old_model:
             self.app.model = new_model
             self.app.model_context = new_context
+            self.app.token_estimator.update_model(new_model)
             self.console.print(f"[green]모델 변경: {old_model} → {self.app.model} (CTX: {self.app.model_context:,})[/green]", highlight=False)
         self._snap_scroll_to_bottom()
 

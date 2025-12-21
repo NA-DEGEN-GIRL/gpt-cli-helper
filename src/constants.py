@@ -2,11 +2,11 @@
 from typing import Dict, List, Set
 
 # --- Application Core Settings ---
-DEFAULT_MODEL: str = "google/gemini-2.5-pro"
-DEFAULT_CONTEXT_LENGTH: int = 1048576
+DEFAULT_MODEL: str = "anthropic/claude-opus-4.5"
+DEFAULT_CONTEXT_LENGTH: int = 200000
 SUPPORTED_MODES: List[str] = ["dev", "general", "teacher"]
-CONTEXT_TRIM_RATIO: float = 0.7
-VENDOR_SPECIFIC_OFFSET = { "anthropic": 50_000, "google": 2000, "openai": 1000 }
+CONTEXT_TRIM_RATIO: float = 0.75
+VENDOR_SPECIFIC_OFFSET = { "anthropic": 50_000, "google": 10_000, "openai": 10_000 }
 
 API_URL: str = "https://openrouter.ai/api/v1/models"
 
