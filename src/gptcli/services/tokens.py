@@ -9,8 +9,8 @@ from rich.console import Console
 #import src.constants as constants
 
 class TokenEstimator:
-    # Anthropic은 tiktoken 대비 약 2.5배 토큰 사용 (경험적 보정)
-    ANTHROPIC_MULTIPLIER = 2.5
+    # Anthropic은 tiktoken 대비 약 3.0배 토큰 사용 (경험적 보정)
+    ANTHROPIC_MULTIPLIER = 3.0
 
     def __init__(self, console: Console, model: str = "gpt-4"):
         self.console = console
