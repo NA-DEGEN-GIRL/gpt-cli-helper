@@ -18,8 +18,7 @@ class ConfigManager:
 
         Args:
             base_dir (Optional[Path]): 프로젝트의 루트 디렉터리. 기본값은 현재 작업 디렉터리.
-            config_dir (Optional[Path]): ai_models.txt 등이 위치한 설정 디렉터리.
-                                         기본값은 '~/codes/gpt_cli'.
+            config_dir (Optional[Path]): 설정 디렉터리 (현재 미사용, 하위 호환성 유지).
         """
         # --- 경로 정의 ---
         self.BASE_DIR = Path(base_dir) if base_dir else Path.cwd()
@@ -157,18 +156,25 @@ __init__.py
 
     def load_session(self, name: str) -> Dict[str, Any]:
         """지정된 이름의 세션 데이터를 로드합니다."""
-        default_data = {"messages": [], "model": "openai/gpt-5", "context_length": 200000, "usage_history": [], "mode":"dev"}
+        default_data = {
+            "messages": [],
+            "model": "openai/gpt-5",
+            "context_length": 200000,
+            "usage_history": [],
+            "mode": "dev",
+            "summary_history": [],  # 요약 수행 기록
+        }
         path = self.get_session_path(name)
         data = Utils._load_json(path, default_data)
-        
+
         # 레거시 형식 (message 리스트만 있던 경우) 호환
         if isinstance(data, list):
             return {"messages": data, **{k:v for k,v in default_data.items() if k != 'messages'}}
-        
+
         # 키가 없는 경우 기본값으로 채워줌
         for key, value in default_data.items():
             data.setdefault(key, value)
-            
+
         return data
 
     def save_session(
@@ -178,9 +184,15 @@ __init__.py
         model: str,
         context_length: int,
         usage_history: List[Dict],
-        mode: Optional[str] = None,  # ← [추가]
+        mode: Optional[str] = None,
+        summary_history: Optional[List[Dict]] = None,
     ) -> None:
-        """세션 데이터를 파일에 저장합니다."""
+        """세션 데이터를 파일에 저장합니다.
+
+        Args:
+            summary_history: 요약 수행 기록 (SummaryMetadata의 dict 목록).
+                             None이면 기존 값을 유지합니다.
+        """
         path = self.get_session_path(name)
         existing = {}
         if path.exists():
@@ -191,12 +203,19 @@ __init__.py
 
         mode_to_save = (mode if mode is not None else existing.get("mode") or "dev")
 
+        # summary_history가 None이면 기존 값 유지, 아니면 새 값 저장
+        summary_to_save = (
+            summary_history if summary_history is not None
+            else existing.get("summary_history") or []
+        )
+
         data = {
             "messages": msgs,
             "model": model,
             "context_length": context_length,
             "usage_history": usage_history or [],
             "mode": mode_to_save,
+            "summary_history": summary_to_save,
             "total_usage": {
                 "total_prompt_tokens": sum(u.get("prompt_tokens", 0) for u in (usage_history or [])),
                 "total_completion_tokens": sum(u.get("completion_tokens", 0) for u in (usage_history or [])),

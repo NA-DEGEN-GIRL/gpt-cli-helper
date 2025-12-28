@@ -11,3 +11,5 @@ test*/
 *.png
 *.pdf
 test.py
+CLAUDE.md
+.claude/

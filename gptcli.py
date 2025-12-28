@@ -31,6 +31,10 @@ from src.gptcli.services.theme import ThemeManager
 from src.gptcli.services.tokens import TokenEstimator
 from src.gptcli.services.ai_stream import AIStreamParser
 from src.gptcli.services.sessions import SessionService
+from src.gptcli.services.tool_loop import ToolLoopService
+from src.gptcli.services.summarization import SummarizationService
+from src.gptcli.tools.permission import TrustLevel
+from src.gptcli.tools.schemas import estimate_tool_schemas_tokens
 from src.gptcli.ui.completion import PathCompleterWrapper, ConditionalCompleter
 from src.gptcli.utils.common import Utils
 from src.gptcli.commands.handler import CommandHandler
@@ -64,7 +68,30 @@ class GPTCLI:
         self.token_estimator = TokenEstimator(console=self.console)
         self.sessions = SessionService(self.config, self.console)
         self.command_handler = CommandHandler(self, self.config, self.sessions)
-        
+
+        # --- Tool Loop Service 초기화 ---
+        self.tool_loop = ToolLoopService(
+            base_dir=self.config.BASE_DIR,
+            console=self.console,
+            parser=self.parser,
+            trust_level=TrustLevel.READ_ONLY  # 기본값: 읽기 전용 (안전 모드)
+        )
+        # Tool 모드 기본 활성화
+        self.tool_mode_enabled: bool = True
+
+        # --- Summarization Service 초기화 ---
+        self.summarization_service = SummarizationService(
+            console=self.console,
+            token_estimator=self.token_estimator,
+            parser=self.parser,
+            config={
+                "threshold": constants.SUMMARIZATION_THRESHOLD,
+                "min_messages": constants.MIN_MESSAGES_TO_SUMMARIZE,
+                "keep_recent": constants.KEEP_RECENT_MESSAGES,
+                "max_levels": constants.MAX_SUMMARY_LEVELS,
+            }
+        )
+
         self.router = CommandRouter(self.console.print)
         self._register_commands()
 
@@ -146,6 +173,15 @@ class GPTCLI:
         reg("commands", h.handle_commands)
         reg("show_context", h.handle_show_context)
         reg("edit", h.handle_edit)
+
+        # Tool 관련
+        reg("tools", h.handle_tools)
+        reg("trust", h.handle_trust)
+        reg("toolforce", h.handle_toolforce)
+
+        # 요약 관련
+        reg("summarize", h.handle_summarize)
+        reg("show_summary", h.handle_show_summary)
 
     def _setup_prompt_session(self) -> PromptSession:
         command_list = [cmd.split()[0] for cmd in constants.COMMANDS.strip().split('\n')]
@@ -285,7 +321,10 @@ class GPTCLI:
             parts.append(f"{len(self.attached)} files")
         if self.compact_mode:
             parts.append("compact mode")
-            
+        # Tool 모드 상태 표시
+        if self.tool_mode_enabled:
+            parts.append("🔧 tools")
+
         return f"[ {' | '.join(parts)} ]\nQ>> "
 
     def _handle_chat_message(self, user_input: str):
@@ -293,14 +332,33 @@ class GPTCLI:
         # 1. 메시지 객체 생성 및 대화 기록 추가
         user_message = self._prepare_user_message(user_input)
         self.messages.append(user_message)
-        
-        # 2. Compact 모드 적용 및 컨텍스트 트리밍
+
+        # 2. Compact 모드 적용
         messages_to_send = self.get_messages_for_sending()
         system_prompt_content = Utils.get_system_prompt_content(self.mode)
-        
+
         reserve_map = {200000: 32000, 128000: 16000}
         reserve_for_completion = reserve_map.get(self.model_context, 4096)
-        
+
+        # Tool 모드가 활성화되어 있으면 Tool 스키마 토큰도 계산
+        tools_tokens = estimate_tool_schemas_tokens() if self.tool_mode_enabled else 0
+        system_prompt_tokens = self.token_estimator.count_text_tokens(system_prompt_content)
+
+        # 2.5. 자동 요약 확인 및 수행 (컨텍스트 임계값 초과 시)
+        messages_to_send, was_summarized = self.summarization_service.check_and_summarize(
+            messages=messages_to_send,
+            model=self.model,
+            model_context_limit=self.model_context,
+            system_prompt_tokens=system_prompt_tokens,
+            reserve_for_completion=reserve_for_completion,
+            tools_tokens=tools_tokens
+        )
+
+        # 요약이 수행되었으면 self.messages도 업데이트
+        if was_summarized:
+            self.messages = messages_to_send.copy()
+
+        # 3. 컨텍스트 트리밍 (요약 이후에도 필요할 수 있음)
         final_messages = Utils.trim_messages_by_tokens(
             messages=messages_to_send,
             model_name=self.model,
@@ -309,18 +367,27 @@ class GPTCLI:
             token_estimator=self.token_estimator,
             console=self.console,
             reserve_for_completion=reserve_for_completion,
-            trim_ratio=constants.CONTEXT_TRIM_RATIO
+            trim_ratio=constants.CONTEXT_TRIM_RATIO,
+            tools_tokens=tools_tokens
         )
 
         if not final_messages:
             self.messages.pop() # 전송 실패 시 마지막 메시지 제거
             return
 
-        # 3. API 호출 및 응답 스트리밍
+        # 3. API 호출 및 응답 스트리밍 (Tool Loop 사용)
         system_prompt = {"role": "system", "content": system_prompt_content}
-        result = self.parser.stream_and_parse(
-            system_prompt, final_messages, self.model, self.pretty_print_enabled
-        )
+
+        # Tool 모드가 활성화된 경우 Tool Loop 사용
+        if self.tool_mode_enabled:
+            result = self.tool_loop.run_with_tools(
+                system_prompt, final_messages, self.model, self.pretty_print_enabled
+            )
+        else:
+            # Tool 모드 비활성화 시 기존 방식
+            result = self.tool_loop.run_single(
+                system_prompt, final_messages, self.model, self.pretty_print_enabled
+            )
 
         try:
             self.command_handler._snap_scroll_to_bottom()
@@ -330,11 +397,16 @@ class GPTCLI:
         if result is None:
             self.messages.pop() # API 호출 실패/취소 시 마지막 메시지 제거
             return
-            
+
         # 4. 응답 처리 및 저장
+        # Tool 모드와 일반 모드 모두 동일한 반환 형식: (response, usage)
+        # Tool 실행 중간 메시지(tool_calls, tool results)는 세션에 저장하지 않음
+        # 이는 Anthropic API의 tool_use/tool_result 페어링 요구사항 때문
         self.last_response, usage_info = result
+
         self.last_reply_code_blocks = Utils.extract_code_blocks(self.last_response)
-        
+
+        # 최종 텍스트 응답만 저장 (tool_calls 없는 순수 텍스트)
         self.messages.append({"role": "assistant", "content": self.last_response})
         
         if usage_info:
@@ -384,6 +456,23 @@ class GPTCLI:
         self._load_initial_session()
         self.console.print(Panel.fit(constants.COMMANDS, title="[yellow]/명령어[/yellow]"))
         self.console.print(f"[cyan]세션('{self.current_session_name}') 시작 – 모델: {self.model}[/cyan]")
+
+        # Tool 모드 안내
+        if self.tool_mode_enabled:
+            trust_status = self.tool_loop.get_trust_status()
+            self.console.print(
+                f"\n[bold cyan]🔧 Tool 모드 활성화[/bold cyan] | {trust_status}",
+                highlight=False
+            )
+            self.console.print(
+                "[dim]AI가 Read/Grep/Glob으로 파일을 읽을 수 있습니다. "
+                "Write/Edit/Bash는 실행 전 확인을 요청합니다.[/dim]",
+                highlight=False
+            )
+            self.console.print(
+                "[dim]/trust full → 모든 Tool 자동 실행 | /trust none → 항상 확인 | /tools → Tool 모드 OFF[/dim]\n",
+                highlight=False
+            )
         
         while True:
             try:

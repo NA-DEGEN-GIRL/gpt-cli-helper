@@ -8,6 +8,12 @@ SUPPORTED_MODES: List[str] = ["dev", "general", "teacher"]
 CONTEXT_TRIM_RATIO: float = 0.75
 VENDOR_SPECIFIC_OFFSET = { "anthropic": 50_000, "google": 10_000, "openai": 10_000 }
 
+# --- Summarization Settings ---
+SUMMARIZATION_THRESHOLD: float = 0.80       # 80% 사용 시 자동 요약 트리거
+MIN_MESSAGES_TO_SUMMARIZE: int = 6          # 최소 요약 대상 메시지 수
+KEEP_RECENT_MESSAGES: int = 4               # 요약에서 제외할 최근 메시지 수
+MAX_SUMMARY_LEVELS: int = 3                 # 최대 재요약 횟수
+
 API_URL: str = "https://openrouter.ai/api/v1/models"
 
 # --- Command & File Types ---
@@ -31,6 +37,11 @@ COMMANDS: str = """
 /diff_code                      → 코드 블록 비교 뷰어 열기
 /reset <--no-snapshot | --hard> → reset (README.md 참고)
 /show_context                   → 현재 컨텍스트 사용량 확인
+/tools                          → Tool 모드 ON/OFF 토글 (파일 수정 기능)
+/trust <full|read_only|none>    → Tool 신뢰 수준 설정
+/toolforce                      → Tool 강제 모드 토글 (항상 Tool 사용)
+/summarize [--force]            → 컨텍스트 수동 요약 (오래된 대화 압축)
+/show_summary                   → 현재 요약 정보 표시
 /exit                           → 종료
 """.strip()
 
@@ -104,6 +115,26 @@ PROMPT_TEMPLATES: Dict[str, str] = {
         4.  **컨텍스트:** 사용자는 `[파일: 파일명]\n\`\`\`...\`\`\`` 형식으로 코드를 첨부할 수 있습니다. 이 컨텍스트를 이해하고 답변에 활용하세요.
         5.  ```diff``` 형태로 출력하지말고, 일반 코드 형태로 출력하세요. 이때 수정된 부분을 명확이 comment 형태로 알려줘야합니다.
         당신의 답변은 간결하면서도 사용자의 질문에 대한 핵심을 관통해야 합니다.
+
+        **[Tool 사용 지침 - 중요!]**
+        당신은 파일 시스템에 접근할 수 있는 도구들을 가지고 있습니다.
+        사용자가 코드 수정, 파일 읽기, 검색 등을 요청하면 **반드시 도구를 사용**하세요.
+        텍스트로만 응답하지 말고, 실제로 도구를 호출하여 작업을 수행하세요.
+
+        **사용 가능한 도구:**
+        - **Read**: 파일 내용을 읽습니다. 사용자가 파일을 보여달라고 하면 이 도구를 사용하세요.
+        - **Write**: 파일에 내용을 씁니다. 새 파일을 만들거나 전체를 덮어쓸 때 사용합니다.
+        - **Edit**: 파일에서 특정 문자열을 찾아 치환합니다. 코드 일부를 수정할 때 사용합니다.
+        - **Bash**: 셸 명령을 실행합니다. ls, git, npm 등 명령어 실행에 사용합니다.
+        - **Grep**: 정규식 패턴으로 파일 내용을 검색합니다. 코드에서 특정 패턴을 찾을 때 사용합니다.
+        - **Glob**: glob 패턴으로 파일을 찾습니다. 특정 확장자 파일 목록을 얻을 때 사용합니다.
+
+        **필수 규칙:**
+        1. 사용자가 "파일을 읽어줘", "코드 보여줘" 등을 요청하면 → Read 도구 사용
+        2. 사용자가 "코드를 수정해줘", "버그 고쳐줘" 등을 요청하면 → Read로 먼저 읽고, Edit로 수정
+        3. 사용자가 "파일 찾아줘", "검색해줘" 등을 요청하면 → Grep 또는 Glob 도구 사용
+        4. 사용자가 "명령어 실행해줘", "빌드해줘" 등을 요청하면 → Bash 도구 사용
+        5. 코드 예시를 텍스트로만 보여주지 말고, 실제로 Write/Edit로 파일에 적용하세요.
     """,
     "teacher": """
         당신은 코드 분석의 대가, '아키텍트(Architect)'입니다. 당신의 임무는 복잡한 코드 베이스를 유기적인 시스템으로 파악하고, 학생(사용자)이 그 구조와 흐름을 완벽하게 이해할 수 있도록 가르치는 것입니다.

@@ -1061,3 +1061,163 @@ class CommandHandler:
             )
             , highlight=False
         )
+
+    def handle_tools(self, args: List[str]) -> None:
+        """Tool 모드를 토글합니다."""
+        self.app.tool_mode_enabled = not self.app.tool_mode_enabled
+        status = "[green]활성화[/green]" if self.app.tool_mode_enabled else "[yellow]비활성화[/yellow]"
+        self.console.print(f"Tool 모드가 {status}되었습니다.", highlight=False)
+
+        if self.app.tool_mode_enabled:
+            self.console.print(
+                "[dim]AI가 Read/Write/Edit/Bash/Grep/Glob 도구를 사용하여 "
+                "파일을 읽고, 수정하고, 명령을 실행할 수 있습니다.[/dim]",
+                highlight=False
+            )
+            # 현재 신뢰 수준 표시
+            trust_status = self.app.tool_loop.get_trust_status()
+            self.console.print(f"[dim]현재 {trust_status}[/dim]", highlight=False)
+        else:
+            self.console.print(
+                "[dim]AI는 텍스트 응답만 생성합니다. 파일 수정이나 명령 실행은 불가능합니다.[/dim]",
+                highlight=False
+            )
+
+    def handle_trust(self, args: List[str]) -> None:
+        """Tool 신뢰 수준을 설정합니다."""
+        from src.gptcli.tools.permission import TrustLevel
+
+        valid_levels = {
+            "full": TrustLevel.FULL,
+            "read_only": TrustLevel.READ_ONLY,
+            "none": TrustLevel.NONE,
+        }
+
+        if not args:
+            # 현재 상태 표시
+            current = self.app.tool_loop.get_trust_status()
+            self.console.print(f"현재 {current}", highlight=False)
+            self.console.print("\n[yellow]사용법: /trust <full|read_only|none>[/yellow]", highlight=False)
+            self.console.print("[dim]  full      - 모든 Tool 자동 실행[/dim]", highlight=False)
+            self.console.print("[dim]  read_only - Read/Grep/Glob만 자동 허용[/dim]", highlight=False)
+            self.console.print("[dim]  none      - 모든 Tool 실행 전 확인[/dim]", highlight=False)
+            return
+
+        level_name = args[0].lower()
+
+        if level_name not in valid_levels:
+            self.console.print(
+                f"[red]알 수 없는 신뢰 수준: {level_name}[/red]\n"
+                f"[yellow]사용 가능: full, read_only, none[/yellow]",
+                highlight=False
+            )
+            return
+
+        self.app.tool_loop.set_trust_level(valid_levels[level_name])
+
+    def handle_toolforce(self, args: List[str]) -> None:
+        """Tool 강제 모드를 토글합니다."""
+        current = self.app.tool_loop.force_mode
+        self.app.tool_loop.set_force_mode(not current)
+
+    def handle_summarize(self, args: List[str]) -> None:
+        """
+        수동으로 컨텍스트 요약을 실행합니다.
+
+        사용법:
+            /summarize           → 요약 시도
+            /summarize --force   → 메시지 수/레벨 제한 무시하고 강제 요약
+        """
+        force = "--force" in args or "-f" in args
+
+        if not self.app.messages:
+            self.console.print("[yellow]요약할 대화 내용이 없습니다.[/yellow]", highlight=False)
+            return
+
+        # 현재 상태 표시
+        from src.gptcli.utils.common import Utils
+        system_prompt = Utils.get_system_prompt_content(self.app.mode)
+        system_tokens = self.app.token_estimator.count_text_tokens(system_prompt)
+
+        reserve = 32000 if self.app.model_context >= 200000 else (16000 if self.app.model_context >= 128000 else 4096)
+
+        used, available, ratio = self.app.summarization_service.calculate_context_usage(
+            self.app.messages,
+            self.app.model_context,
+            system_tokens,
+            reserve,
+            0
+        )
+
+        self.console.print(
+            f"[cyan]현재 컨텍스트: {used:,}/{available:,} 토큰 ({ratio:.1%})[/cyan]",
+            highlight=False
+        )
+        self.console.print(
+            f"[dim]메시지 수: {len(self.app.messages)}개[/dim]",
+            highlight=False
+        )
+
+        # 요약 수행
+        new_messages, was_summarized = self.app.summarization_service.manual_summarize(
+            self.app.messages,
+            self.app.model,
+            force=force
+        )
+
+        if was_summarized:
+            self.app.messages = new_messages
+            # 세션 저장
+            self.config.save_session(
+                self.app.current_session_name,
+                self.app.messages,
+                self.app.model,
+                self.app.model_context,
+                self.app.usage_history,
+                mode=self.app.mode
+            )
+            self.console.print("[green]요약이 세션에 저장되었습니다.[/green]", highlight=False)
+        else:
+            self.console.print("[dim]요약이 수행되지 않았습니다.[/dim]", highlight=False)
+
+    def handle_show_summary(self, args: List[str]) -> None:
+        """
+        현재 세션의 요약 정보를 표시합니다.
+        """
+        from rich.table import Table
+
+        summary_info = self.app.summarization_service.get_summary_info(self.app.messages)
+
+        if not summary_info:
+            self.console.print("[yellow]현재 세션에 요약이 없습니다.[/yellow]", highlight=False)
+            self.console.print("[dim]'/summarize' 명령으로 수동 요약을 실행할 수 있습니다.[/dim]", highlight=False)
+            return
+
+        # 요약 내용 표시
+        self.console.print(Panel(
+            summary_info["content"],
+            title="[cyan]📋 현재 요약 내용[/cyan]",
+            border_style="cyan"
+        ), highlight=False)
+
+        # 메타데이터 표시
+        meta = summary_info.get("metadata")
+        if meta:
+            table = Table(title="요약 메타데이터", box=ROUNDED)
+            table.add_column("항목", style="cyan")
+            table.add_column("값", style="white")
+
+            table.add_row("생성 시간", meta.get("created_at", "N/A"))
+            table.add_row("요약된 메시지 수", str(meta.get("summarized_message_count", 0)))
+            table.add_row("원본 토큰", f"{meta.get('summarized_token_count', 0):,}")
+            table.add_row("요약 토큰", f"{meta.get('summary_token_count', 0):,}")
+            table.add_row("압축률", f"{meta.get('compression_ratio', 0):.1%}")
+            table.add_row("요약 모델", meta.get("model_used", "N/A").split("/")[-1])
+            table.add_row("요약 레벨", str(meta.get("summary_level", 1)))
+
+            self.console.print(table, highlight=False)
+
+        # 요약 히스토리 표시
+        history = self.app.summarization_service.summary_history
+        if len(history) > 1:
+            self.console.print(f"\n[dim]이 세션에서 총 {len(history)}회 요약 수행됨[/dim]", highlight=False)

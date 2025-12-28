@@ -1,5 +1,6 @@
 # src/gptcli/services/ai_stream.py
 from __future__ import annotations
+import json
 import re, time, sys
 from typing import Any, Dict, List, Optional, Tuple
 from rich.console import Console
@@ -8,6 +9,90 @@ from rich.syntax import Syntax
 from rich.live import Live
 from openai import OpenAI, OpenAIError
 import src.constants as constants
+
+
+# ============================================================================
+# Tool Call 버퍼 헬퍼 (스트리밍 시 조각을 조합)
+# ============================================================================
+class ToolCallBuffer:
+    """
+    스트리밍 응답에서 tool_calls 조각을 index별로 조합합니다.
+
+    OpenAI API는 tool_calls를 스트리밍할 때 각 delta에 다음 형식으로 전달합니다:
+    delta.tool_calls = [
+        {
+            "index": 0,
+            "id": "call_xxx",  # 첫 조각에만 있음
+            "type": "function",
+            "function": {
+                "name": "ToolName",  # 첫 조각에만 있음
+                "arguments": "{\\"key\\"  # 조각별로 이어짐
+            }
+        }
+    ]
+    """
+
+    def __init__(self):
+        self._calls: Dict[int, Dict[str, Any]] = {}
+
+    def add_delta(self, tool_calls_delta: List[Any]) -> None:
+        """delta.tool_calls 조각을 버퍼에 추가합니다."""
+        if not tool_calls_delta:
+            return
+
+        for tc in tool_calls_delta:
+            idx = tc.index if hasattr(tc, 'index') else tc.get('index', 0)
+
+            # 해당 index의 버퍼가 없으면 초기화
+            if idx not in self._calls:
+                self._calls[idx] = {
+                    "id": "",
+                    "type": "function",
+                    "function": {
+                        "name": "",
+                        "arguments": ""
+                    }
+                }
+
+            call = self._calls[idx]
+
+            # id 업데이트 (첫 조각에만 있음)
+            tc_id = tc.id if hasattr(tc, 'id') else tc.get('id')
+            if tc_id:
+                call["id"] = tc_id
+
+            # function 정보 업데이트
+            func = tc.function if hasattr(tc, 'function') else tc.get('function')
+            if func:
+                func_name = func.name if hasattr(func, 'name') else func.get('name')
+                func_args = func.arguments if hasattr(func, 'arguments') else func.get('arguments')
+
+                if func_name:
+                    call["function"]["name"] = func_name
+                if func_args:
+                    call["function"]["arguments"] += func_args
+
+    def get_tool_calls(self) -> List[Dict[str, Any]]:
+        """완성된 tool_calls 목록을 반환합니다."""
+        if not self._calls:
+            return []
+        # index 순서대로 정렬하여 반환
+        return [self._calls[idx] for idx in sorted(self._calls.keys())]
+
+    def has_calls(self) -> bool:
+        """tool_calls가 있는지 여부."""
+        return bool(self._calls)
+
+    def get_current_status(self) -> str:
+        """현재 버퍼링 중인 tool_calls 상태 문자열."""
+        if not self._calls:
+            return ""
+        parts = []
+        for idx in sorted(self._calls.keys()):
+            call = self._calls[idx]
+            name = call["function"]["name"] or "..."
+            parts.append(f"[{idx}] {name}")
+        return ", ".join(parts)
 
 class AIStreamParser:
     """
@@ -122,8 +207,10 @@ class AIStreamParser:
         system_prompt: Dict[str, Any],
         final_messages: List[Dict[str, Any]],
         model: str,
-        pretty_print: bool = True
-    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        pretty_print: bool = True,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: str = "auto"
+    ) -> Optional[Tuple[str, Dict[str, Any], List[Dict[str, Any]]]]:
         """
         API 요청을 보내고, 스트리밍 응답을 파싱하여 실시간으로 렌더링합니다.
 
@@ -132,25 +219,46 @@ class AIStreamParser:
             final_messages (List[Dict]): 컨텍스트가 트리밍된 최종 메시지 목록.
             model (str): 사용할 모델 이름.
             pretty_print (bool): Rich 라이브러리를 사용한 고급 출력 여부.
+            tools (Optional[List[Dict]]): Tool 스키마 목록 (Function Calling용).
 
         Returns:
-            Optional[Tuple[str, Dict]]: (전체 응답 문자열, 토큰 사용량 정보) 튜플.
+            Optional[Tuple[str, Dict, List[Dict]]]: (전체 응답 문자열, 토큰 사용량 정보, tool_calls 목록) 튜플.
                                          실패 시 None.
         """
         self._reset_state()
         usage_info = None
+        tool_call_buffer = ToolCallBuffer()  # tool_calls 버퍼링용
 
         model_online = model if model.endswith(":online") else f"{model}:online"
-        extra_body = {'reasoning': {}} # alwyas default
+
+        # Gemini 모델은 tools + reasoning을 함께 사용할 때 thought_signature 오류 발생
+        # tools 사용 시 Gemini에서는 reasoning을 비활성화
+        is_gemini = "gemini" in model.lower()
+        if tools and is_gemini:
+            extra_body = {}  # Gemini + tools: reasoning 비활성화
+        else:
+            extra_body = {'reasoning': {}}  # 기본값: reasoning 활성화
+
+        # API 호출 파라미터 구성
+        api_params = {
+            "model": model_online,
+            "messages": [system_prompt] + final_messages,
+            "stream": True,
+            "extra_body": extra_body,
+        }
+
+        # tools가 제공된 경우 추가
+        if tools:
+            api_params["tools"] = tools
+            api_params["tool_choice"] = tool_choice
+
+            # 디버그: Tool 모드 활성화 상태 표시
+            choice_str = "[강제]" if tool_choice == "required" else "[자동]"
+            self.console.print(f"[dim]🔧 Tools 활성화: {len(tools)}개 도구 {choice_str}[/dim]", highlight=False)
 
         try:
             with self.console.status("[cyan]Loading...", spinner="dots"):
-                stream = self.client.chat.completions.create(
-                    model=model_online,
-                    messages=[system_prompt] + final_messages,
-                    stream=True,
-                    extra_body=extra_body,
-                )
+                stream = self.client.chat.completions.create(**api_params)
         except KeyboardInterrupt:
             self.console.print("\n[yellow]⚠️ 응답이 중단되었습니다.[/yellow]", highlight=False)
             return None
@@ -171,6 +279,10 @@ class AIStreamParser:
                     if hasattr(chunk, 'usage') and chunk.usage: usage_info = chunk.usage.model_dump()
                     delta = chunk.choices[0].delta if (chunk.choices and chunk.choices[0]) else None
                     if delta:
+                        # tool_calls 처리
+                        if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                            tool_call_buffer.add_delta(delta.tool_calls)
+                        # content 처리
                         content = getattr(delta, "reasoning", "") or getattr(delta, "content", "")
                         if content:
                             self.full_reply += content
@@ -178,7 +290,7 @@ class AIStreamParser:
             except KeyboardInterrupt: self.console.print("\n[yellow]⚠️ 응답 중단.[/yellow]", highlight=False)
             except StopIteration: pass
             finally: self.console.print()
-            return self.full_reply, usage_info
+            return self.full_reply, usage_info, tool_call_buffer.get_tool_calls()
 
         # --- Pretty Print 모드 (상태 머신) ---
         stream_iter = iter(stream)
@@ -191,6 +303,13 @@ class AIStreamParser:
                 delta = chunk.choices[0].delta if (chunk.choices and chunk.choices[0]) else None
                 # reasoning 단계에서 content를 먼저 버퍼링했는지 추적
                 content_buffered_in_reasoning = False
+
+                # tool_calls 처리 (Pretty Print 모드)
+                if delta and hasattr(delta, 'tool_calls') and delta.tool_calls:
+                    tool_call_buffer.add_delta(delta.tool_calls)
+                    # tool_calls가 있으면 content 없이 루프 계속
+                    if not (delta.content or (hasattr(delta, 'reasoning') and delta.reasoning)):
+                        continue
 
                 # Reasoning 처리
                 if hasattr(delta, 'reasoning') and delta.reasoning:
@@ -339,8 +458,18 @@ class AIStreamParser:
             if code_live and code_live.is_started: code_live.stop()
 
         self.console.print()
-        return self.full_reply, usage_info
-    
+
+        # tool_calls 결과 표시
+        tool_calls = tool_call_buffer.get_tool_calls()
+        if tool_calls:
+            self.console.print(f"\n[cyan]🔧 Tool 호출 {len(tool_calls)}개 감지됨[/cyan]", highlight=False)
+            for tc in tool_calls:
+                name = tc.get("function", {}).get("name", "unknown")
+                args_preview = tc.get("function", {}).get("arguments", "")[:50]
+                self.console.print(f"  [dim]• {name}({args_preview}...)[/dim]", highlight=False)
+
+        return self.full_reply, usage_info, tool_calls
+
     @staticmethod
     def _is_fence_start_line(line: str) -> Optional[Tuple[str, int, str]]:
         """

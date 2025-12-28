@@ -161,13 +161,32 @@ class Utils:
 
     @staticmethod
     def _count_message_tokens_with_estimator(msg: Dict[str, Any], te: 'TokenEstimator') -> int:
-        total = 6  # 메시지 구조 오버헤드
+        """
+        메시지의 토큰 수를 추정합니다.
+
+        주의: base64 인코딩된 이미지/파일은 실제로 매우 많은 토큰을 사용합니다.
+        base64 문자열 자체가 API에 전송되므로, 문자열 길이 기반으로 계산합니다.
+        """
+        total = 20  # 메시지 구조 오버헤드 (기존 6에서 상향)
         content = msg.get("content", "")
-        
+
+        # tool_calls가 있는 assistant 메시지
+        tool_calls = msg.get("tool_calls")
+        if tool_calls:
+            # tool_calls JSON 직렬화 크기 기반 추정
+            import json
+            tool_calls_json = json.dumps(tool_calls, ensure_ascii=False)
+            total += len(tool_calls_json) // 3  # 3글자 ≈ 1토큰
+
+        # tool role 메시지 (tool 결과)
+        if msg.get("role") == "tool":
+            tool_call_id = msg.get("tool_call_id", "")
+            total += len(tool_call_id) // 4 + 10  # ID + 오버헤드
+
         if isinstance(content, str):
             total += te.count_text_tokens(content)
             return total
-        
+
         if isinstance(content, list):
             for part in content:
                 ptype = part.get("type")
@@ -178,28 +197,38 @@ class Utils:
                     url = image_url.get("url", "")
                     detail = image_url.get("detail", "auto")
                     if isinstance(url, str) and "base64," in url:
-                        try:
-                            b64 = url.split("base64,", 1)[1]
-                            total += te.estimate_image_tokens(b64, detail=detail)
-                        except Exception:
-                            total += 1105
+                        # 핵심 수정: base64 문자열 길이 기반 토큰 계산
+                        # base64는 원본의 4/3 크기, 4글자 ≈ 1토큰
+                        # 실제로는 이미지 처리 토큰이 추가되므로 보수적으로 계산
+                        b64_part = url.split("base64,", 1)[1] if "base64," in url else url
+                        # base64 길이 / 4 (대략적인 토큰 수) + 이미지 처리 오버헤드
+                        base64_tokens = len(b64_part) // 4
+                        total += max(base64_tokens, te.estimate_image_tokens(b64_part, detail=detail))
                     else:
                         total += 85
                 elif ptype == "file":
                     file_data = part.get("file", {})
                     data_url = file_data.get("file_data", "")
                     filename = file_data.get("filename", "")
-                    if isinstance(filename, str) and filename.lower().endswith(".pdf") and "base64," in data_url:
-                        try:
-                            b64 = data_url.split("base64,", 1)[1]
-                            pdf_bytes = base64.b64decode(b64)
-                            total += int(len(pdf_bytes) / 1024 * 3)
-                        except Exception:
-                            total += 1000
+                    if "base64," in data_url:
+                        # base64 인코딩된 파일은 문자열 길이 기반으로 계산
+                        b64_part = data_url.split("base64,", 1)[1]
+                        base64_tokens = len(b64_part) // 4
+                        if isinstance(filename, str) and filename.lower().endswith(".pdf"):
+                            # PDF는 추가 처리 토큰이 있을 수 있음
+                            total += int(base64_tokens * 1.5)
+                        else:
+                            total += base64_tokens
                     else:
                         total += 500
         return total
     
+    @staticmethod
+    def _is_summary_message(msg: Dict[str, Any]) -> bool:
+        """메시지가 요약 메시지인지 확인합니다."""
+        meta = msg.get("_summary_meta", {})
+        return bool(meta.get("is_summary"))
+
     @staticmethod
     def trim_messages_by_tokens(
         messages: List[Dict[str, Any]],
@@ -210,8 +239,18 @@ class Utils:
         console: Console,
         reserve_for_completion: int = 4096,
         trim_ratio: Optional[float] = None,
+        tools_tokens: int = 0,
     ) -> List[Dict[str, Any]]:
-        """컨텍스트 한계에 맞춰 메시지 목록을 트리밍"""
+        """컨텍스트 한계에 맞춰 메시지 목록을 트리밍
+
+        Args:
+            tools_tokens: Tool 스키마가 차지하는 토큰 수 (0이면 tools 미사용)
+
+        Note:
+            요약 메시지(_summary_meta.is_summary=True)는 트리밍에서 제외되어
+            항상 보존됩니다. 요약에는 이전 대화의 핵심 정보가 담겨 있으므로
+            삭제하면 컨텍스트 연속성이 깨집니다.
+        """
         te = token_estimator
         trim_ratio = float(trim_ratio) if trim_ratio is not None else float(constants.CONTEXT_TRIM_RATIO)
 
@@ -229,7 +268,11 @@ class Utils:
                 console.print(f"[dim]벤더별 오프셋 적용({vendor}): -{vendor_offset:,} 토큰[/dim]", highlight=False)
                 break
 
-        available_for_prompt = model_context_limit - sys_tokens - reserve_for_completion - vendor_offset
+        # Tool 스키마 토큰도 차감
+        if tools_tokens > 0:
+            console.print(f"[dim]Tool 스키마: ~{tools_tokens:,} 토큰[/dim]", highlight=False)
+
+        available_for_prompt = model_context_limit - sys_tokens - reserve_for_completion - vendor_offset - tools_tokens
 
         if available_for_prompt <= 0:
             console.print("[red]예약 공간과 오프셋만으로 컨텍스트가 가득 찼습니다.[/red]",highlight=False)
@@ -237,47 +280,112 @@ class Utils:
 
         prompt_budget = int(available_for_prompt * trim_ratio)
 
-        # 메시지별 토큰 산출
-        per_message = [(m, Utils._count_message_tokens_with_estimator(m, te)) for m in messages]
+        # ── 요약 메시지 분리 (항상 보존) ──
+        summary_messages: List[Dict[str, Any]] = []
+        regular_messages: List[Dict[str, Any]] = []
+        summary_tokens = 0
+
+        for m in messages:
+            if Utils._is_summary_message(m):
+                summary_messages.append(m)
+                summary_tokens += Utils._count_message_tokens_with_estimator(m, te)
+            else:
+                regular_messages.append(m)
+
+        # 요약 토큰을 예산에서 차감
+        effective_budget = prompt_budget - summary_tokens
+        if effective_budget <= 0:
+            console.print(
+                f"[yellow]요약 메시지({summary_tokens:,}tk)가 예산({prompt_budget:,}tk)을 초과합니다.[/yellow]",
+                highlight=False
+            )
+            # 요약만이라도 반환
+            return summary_messages
+
+        if summary_messages:
+            console.print(
+                f"[cyan]📋 요약 메시지 {len(summary_messages)}개 보존 ({summary_tokens:,}tk)[/cyan]",
+                highlight=False
+            )
+
+        # 메시지별 토큰 산출 (디버그 로그 항상 표시)
+        per_message = []
+        total_estimated = 0
+        console.print(f"[dim]━━━ 메시지별 토큰 분석 ({len(regular_messages)}개) ━━━[/dim]", highlight=False)
+        for i, m in enumerate(regular_messages):
+            t = Utils._count_message_tokens_with_estimator(m, te)
+            per_message.append((m, t))
+            total_estimated += t
+            role = m.get("role", "?")
+            content = m.get("content", "")
+            # content 타입 및 크기 분석
+            if isinstance(content, list):
+                has_base64 = any(
+                    ("base64," in str(p.get("image_url", {}).get("url", ""))) or
+                    ("base64," in str(p.get("file", {}).get("file_data", "")))
+                    for p in content
+                )
+                content_info = f"list[{len(content)}]" + (" 🖼️" if has_base64 else "")
+            else:
+                content_info = f"str[{len(content)}자]"
+
+            # 모든 메시지 표시 (토큰 많을수록 강조)
+            if t > 10000:
+                console.print(f"  [red]#{i} {role} {content_info}: {t:,}tk 🚨[/red]", highlight=False)
+            elif t > 1000:
+                console.print(f"  [yellow]#{i} {role} {content_info}: {t:,}tk[/yellow]", highlight=False)
+            else:
+                console.print(f"  [dim]#{i} {role} {content_info}: {t:,}tk[/dim]", highlight=False)
+
+        console.print(f"[cyan]📊 총 추정: {total_estimated:,}tk / 예산: {effective_budget:,}tk[/cyan]", highlight=False)
 
         trimmed: List[Dict[str, Any]] = []
         used = 0
         for m, t in reversed(per_message):
-            if used + t > prompt_budget:
+            if used + t > effective_budget:
                 break
             trimmed.append(m)
             used += t
         trimmed.reverse()
 
-        if not trimmed and messages:
-            last = messages[-1]
+        if not trimmed and regular_messages:
+            last = regular_messages[-1]
             if isinstance(last.get("content"), list):
                 text_parts = [p for p in last["content"] if p.get("type") == "text"]
                 minimal = {"role": last.get("role", "user"), "content": text_parts[0]["text"] if text_parts else ""}
-                if Utils._count_message_tokens_with_estimator(minimal, te) <= prompt_budget:
+                if Utils._count_message_tokens_with_estimator(minimal, te) <= effective_budget:
                     console.print("[yellow]최신 메시지의 첨부를 제거하여 텍스트만 전송합니다.[/yellow]")
-                    return [minimal]
+                    return summary_messages + [minimal]
+            # 요약이 있으면 요약만이라도 반환
+            if summary_messages:
+                console.print("[yellow]컨텍스트 한계로 요약만 전송합니다.[/yellow]")
+                return summary_messages
             console.print("[red]컨텍스트 한계로 인해 메시지를 전송할 수 없습니다. 입력을 줄여주세요.[/red]")
             return []
 
-        if len(trimmed) < len(messages):
-            removed = len(messages) - len(trimmed)
+        # tools 토큰 정보 문자열 (있을 때만)
+        tools_info = f" | tools:{tools_tokens:,}" if tools_tokens > 0 else ""
+
+        total_used = used + summary_tokens
+        if len(trimmed) < len(regular_messages):
+            removed = len(regular_messages) - len(trimmed)
             console.print(
                 f"[dim]컨텍스트 트리밍: {removed}개 제거 | "
                 f"[dim]최신 메시지: {len(trimmed)}개 사용 | "
-                f"사용:{used:,}/{prompt_budget:,} (총 프롬프트 여유:{available_for_prompt:,} | "
-                f"ratio:{trim_ratio:.2f})[/dim]",
+                f"사용:{total_used:,}/{prompt_budget:,} (총 프롬프트 여유:{available_for_prompt:,} | "
+                f"ratio:{trim_ratio:.2f}{tools_info})[/dim]",
                 highlight=False
             )
         else:
             # 트리밍이 발생하지 않아도 로그 출력
             console.print(
-                f"[dim]컨텍스트 사용:{used:,}/{prompt_budget:,} "
-                f"(sys:{sys_tokens:,} | reserve:{reserve_for_completion:,} | ratio:{trim_ratio:.2f} | offset:{vendor_offset:,})[/dim]",
+                f"[dim]컨텍스트 사용:{total_used:,}/{prompt_budget:,} "
+                f"(sys:{sys_tokens:,} | reserve:{reserve_for_completion:,} | ratio:{trim_ratio:.2f} | offset:{vendor_offset:,}{tools_info})[/dim]",
                 highlight=False
             )
-            
-        return trimmed
+
+        # ── 최종 결과: 요약 메시지 + 트리밍된 일반 메시지 ──
+        return summary_messages + trimmed
 
     @staticmethod
     def extract_code_blocks(markdown: str) -> List[Tuple[str, str]]:
