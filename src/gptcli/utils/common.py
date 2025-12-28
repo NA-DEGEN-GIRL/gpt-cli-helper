@@ -308,34 +308,13 @@ class Utils:
                 highlight=False
             )
 
-        # 메시지별 토큰 산출 (디버그 로그 항상 표시)
+        # 메시지별 토큰 산출
         per_message = []
         total_estimated = 0
-        console.print(f"[dim]━━━ 메시지별 토큰 분석 ({len(regular_messages)}개) ━━━[/dim]", highlight=False)
         for i, m in enumerate(regular_messages):
             t = Utils._count_message_tokens_with_estimator(m, te)
             per_message.append((m, t))
             total_estimated += t
-            role = m.get("role", "?")
-            content = m.get("content", "")
-            # content 타입 및 크기 분석
-            if isinstance(content, list):
-                has_base64 = any(
-                    ("base64," in str(p.get("image_url", {}).get("url", ""))) or
-                    ("base64," in str(p.get("file", {}).get("file_data", "")))
-                    for p in content
-                )
-                content_info = f"list[{len(content)}]" + (" 🖼️" if has_base64 else "")
-            else:
-                content_info = f"str[{len(content)}자]"
-
-            # 모든 메시지 표시 (토큰 많을수록 강조)
-            if t > 10000:
-                console.print(f"  [red]#{i} {role} {content_info}: {t:,}tk 🚨[/red]", highlight=False)
-            elif t > 1000:
-                console.print(f"  [yellow]#{i} {role} {content_info}: {t:,}tk[/yellow]", highlight=False)
-            else:
-                console.print(f"  [dim]#{i} {role} {content_info}: {t:,}tk[/dim]", highlight=False)
 
         console.print(f"[cyan]📊 총 추정: {total_estimated:,}tk / 예산: {effective_budget:,}tk[/cyan]", highlight=False)
 

@@ -105,6 +105,35 @@ def get_model_context_length(model_id: str) -> int:
     return model_info.get("context_length", constants.DEFAULT_CONTEXT_LENGTH)
 
 
+def supports_reasoning(model_id: str) -> bool:
+    """
+    모델이 reasoning (extended thinking) 파라미터를 지원하는지 확인합니다.
+
+    현재 reasoning을 지원하는 모델:
+    - Anthropic Claude 모델 (claude-3.5-sonnet, claude-opus-4, claude-sonnet-4 등)
+
+    지원하지 않는 모델:
+    - OpenAI GPT 모델 (gpt-4, gpt-5 등)
+    - Google Gemini 모델
+    - 기타 모델
+
+    Args:
+        model_id: 모델 ID (예: "anthropic/claude-opus-4")
+
+    Returns:
+        True if model supports reasoning parameter
+    """
+    model_lower = model_id.lower()
+
+    # Anthropic Claude 모델만 reasoning 지원
+    # OpenRouter에서 anthropic/ 접두사로 시작하는 모델
+    if "anthropic/" in model_lower or "claude" in model_lower:
+        return True
+
+    # OpenAI, Google, 기타 모델은 지원하지 않음
+    return False
+
+
 def get_models_with_tool_support() -> List[str]:
     """
     Tool calling을 지원하는 모든 모델 ID 목록을 반환합니다.

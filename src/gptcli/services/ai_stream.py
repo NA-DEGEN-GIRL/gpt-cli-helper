@@ -9,6 +9,7 @@ from rich.syntax import Syntax
 from rich.live import Live
 from openai import OpenAI, OpenAIError
 import src.constants as constants
+from src.gptcli.models.capabilities import supports_reasoning
 
 
 # ============================================================================
@@ -30,6 +31,9 @@ class ToolCallBuffer:
             }
         }
     ]
+
+    Gemini 모델의 경우 thought_signature가 포함될 수 있으며,
+    이를 보존하여 다음 요청에 다시 보내야 합니다.
     """
 
     def __init__(self):
@@ -61,6 +65,31 @@ class ToolCallBuffer:
             if tc_id:
                 call["id"] = tc_id
 
+            # thought_signature 보존 (Gemini 모델용)
+            # 다양한 위치에서 찾기 시도
+            thought_sig = None
+            # 1. 직접 속성
+            if hasattr(tc, 'thought_signature'):
+                thought_sig = tc.thought_signature
+            # 2. dict 형태
+            elif isinstance(tc, dict) and 'thought_signature' in tc:
+                thought_sig = tc.get('thought_signature')
+            # 3. model_dump()로 변환 후 확인 (Pydantic 모델인 경우)
+            elif hasattr(tc, 'model_dump'):
+                tc_dict = tc.model_dump()
+                thought_sig = tc_dict.get('thought_signature')
+            # 4. function 내부에 있을 수도 있음
+            if not thought_sig:
+                func = tc.function if hasattr(tc, 'function') else tc.get('function') if isinstance(tc, dict) else None
+                if func:
+                    if hasattr(func, 'thought_signature'):
+                        thought_sig = func.thought_signature
+                    elif isinstance(func, dict) and 'thought_signature' in func:
+                        thought_sig = func.get('thought_signature')
+
+            if thought_sig:
+                call["thought_signature"] = thought_sig
+
             # function 정보 업데이트
             func = tc.function if hasattr(tc, 'function') else tc.get('function')
             if func:
@@ -82,6 +111,13 @@ class ToolCallBuffer:
     def has_calls(self) -> bool:
         """tool_calls가 있는지 여부."""
         return bool(self._calls)
+
+    def has_thought_signature(self) -> bool:
+        """thought_signature가 있는지 여부 (Gemini 모델 확인용)."""
+        for call in self._calls.values():
+            if call.get("thought_signature"):
+                return True
+        return False
 
     def get_current_status(self) -> str:
         """현재 버퍼링 중인 tool_calls 상태 문자열."""
@@ -227,17 +263,28 @@ class AIStreamParser:
         """
         self._reset_state()
         usage_info = None
+        finish_reason = None  # 응답 종료 이유 추적 (stop, tool_calls, length 등)
         tool_call_buffer = ToolCallBuffer()  # tool_calls 버퍼링용
 
         model_online = model if model.endswith(":online") else f"{model}:online"
 
-        # Gemini 모델은 tools + reasoning을 함께 사용할 때 thought_signature 오류 발생
-        # tools 사용 시 Gemini에서는 reasoning을 비활성화
+        # 모델별 reasoning 지원 여부에 따라 extra_body 설정
+        # - Anthropic Claude: reasoning 지원 ✅
+        # - OpenAI GPT: reasoning 미지원 ❌ (지원하지 않는 파라미터 무시 또는 오류)
+        # - Google Gemini: tools + reasoning 동시 사용 시 오류 발생
+        #
+        # GPT 모델에 reasoning 파라미터를 보내면 "추론과정만 나오고 응답 종료" 현상 발생
         is_gemini = "gemini" in model.lower()
-        if tools and is_gemini:
-            extra_body = {}  # Gemini + tools: reasoning 비활성화
+
+        if not supports_reasoning(model):
+            # GPT, Gemini 등 reasoning 미지원 모델
+            extra_body = {}
+        elif tools and is_gemini:
+            # Gemini + tools: reasoning 비활성화 (thought_signature 오류 방지)
+            extra_body = {}
         else:
-            extra_body = {'reasoning': {}}  # 기본값: reasoning 활성화
+            # Claude 등 reasoning 지원 모델
+            extra_body = {'reasoning': {}}
 
         # API 호출 파라미터 구성
         api_params = {
@@ -251,6 +298,13 @@ class AIStreamParser:
         if tools:
             api_params["tools"] = tools
             api_params["tool_choice"] = tool_choice
+
+            # GPT 모델 병렬 tool calling - 이제 활성화 (OpenRouter에서 수정됨)
+            # 이전에는 GPT-5/5.2에서 첫 번째 값만 반환되는 버그가 있었음
+            # 문제 발생 시 아래 주석 해제:
+            # is_gpt = "gpt" in model.lower() or "openai/" in model.lower()
+            # if is_gpt:
+            #     api_params["parallel_tool_calls"] = False
 
             # 디버그: Tool 모드 활성화 상태 표시
             choice_str = "[강제]" if tool_choice == "required" else "[자동]"
@@ -277,6 +331,9 @@ class AIStreamParser:
             try:
                 for chunk in stream:
                     if hasattr(chunk, 'usage') and chunk.usage: usage_info = chunk.usage.model_dump()
+                    # finish_reason 캡처 (마지막 청크에 포함됨)
+                    if chunk.choices and chunk.choices[0].finish_reason:
+                        finish_reason = chunk.choices[0].finish_reason
                     delta = chunk.choices[0].delta if (chunk.choices and chunk.choices[0]) else None
                     if delta:
                         # tool_calls 처리
@@ -300,6 +357,9 @@ class AIStreamParser:
             while True:
                 chunk = next(stream_iter)
                 if hasattr(chunk, 'usage') and chunk.usage: usage_info = chunk.usage.model_dump()
+                # finish_reason 캡처 (마지막 청크에 포함됨)
+                if chunk.choices and chunk.choices[0].finish_reason:
+                    finish_reason = chunk.choices[0].finish_reason
                 delta = chunk.choices[0].delta if (chunk.choices and chunk.choices[0]) else None
                 # reasoning 단계에서 content를 먼저 버퍼링했는지 추적
                 content_buffered_in_reasoning = False
@@ -311,8 +371,11 @@ class AIStreamParser:
                     if not (delta.content or (hasattr(delta, 'reasoning') and delta.reasoning)):
                         continue
 
-                # Reasoning 처리
-                if hasattr(delta, 'reasoning') and delta.reasoning:
+                # Reasoning 처리 (모든 모델 - GPT도 reasoning 패널로 표시 후 사라지게)
+                # GPT의 경우 reasoning만 오고 content 없이 tool_calls로 끝날 수 있음
+                # → reasoning은 패널로 표시 후 사라지고, full_reply에는 저장
+                has_reasoning = hasattr(delta, 'reasoning') and delta.reasoning
+                if has_reasoning:
                     # Live 패널 시작 전, 완성된 줄만 출력하고 조각은 버퍼에 남깁니다.
                     if self.normal_buffer and '\n' in self.normal_buffer:
                         parts = self.normal_buffer.rsplit('\n', 1)
@@ -323,6 +386,7 @@ class AIStreamParser:
                     reasoning_live = Live(console=self.console, auto_refresh=True, refresh_per_second=4, transient=False)
                     reasoning_live.start()
                     self.reasoning_buffer = delta.reasoning
+                    reasoning_ended_with_tool_calls = False
                     while True: # Reasoning 내부 루프
                         try:
                             lines, total_lines = self.reasoning_buffer.splitlines(), len(self.reasoning_buffer.splitlines())
@@ -332,25 +396,51 @@ class AIStreamParser:
                             reasoning_live.update(panel)
 
                             chunk = next(stream_iter)
+                            if hasattr(chunk, 'usage') and chunk.usage: usage_info = chunk.usage.model_dump()
+                            if chunk.choices and chunk.choices[0].finish_reason:
+                                finish_reason = chunk.choices[0].finish_reason
                             delta = chunk.choices[0].delta
-                            if hasattr(delta, 'reasoning') and delta.reasoning: 
+                            # tool_calls 처리 (reasoning 중에 tool_calls가 올 수 있음)
+                            if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                                tool_call_buffer.add_delta(delta.tool_calls)
+                            if hasattr(delta, 'reasoning') and delta.reasoning:
                                 self.reasoning_buffer += delta.reasoning
-                            elif delta and delta.content: 
+                            elif delta and delta.content:
                                 self.buffer += delta.content
                                 content_buffered_in_reasoning = True
                                 break
+                            # content 없이 reasoning만 끝난 경우 (GPT의 tool_calls 패턴)
+                            elif chunk.choices[0].finish_reason:
+                                reasoning_ended_with_tool_calls = True
+                                break
                         except StopIteration: break
-                    
+
                     self._collapse_reasoning_live_area(reasoning_live, clear_height=constants.REASONING_PANEL_HEIGHT)
                     reasoning_live = None
-                    if not (delta and delta.content): continue
 
-                if not (delta and delta.content): 
+                    # GPT: reasoning만 있고 content 없이 끝난 경우, reasoning을 full_reply에 저장
+                    if not supports_reasoning(model) and self.reasoning_buffer:
+                        self.full_reply = self.reasoning_buffer
+
+                    if not (delta and delta.content) and not reasoning_ended_with_tool_calls:
+                        continue
+                    # reasoning만 있고 tool_calls로 끝난 경우 content 처리 스킵
+                    if reasoning_ended_with_tool_calls:
+                        continue
+
+                # 아래 GPT reasoning 폴백 로직은 이제 불필요 (위에서 처리됨)
+                gpt_reasoning_as_content = None
+                if False:
+                    gpt_reasoning_as_content = delta.reasoning
+
+                if not (delta and delta.content) and not gpt_reasoning_as_content:
                     continue
-                
-                self.full_reply += delta.content
+
+                # content 또는 GPT의 reasoning을 full_reply에 추가
+                actual_content = delta.content if delta and delta.content else gpt_reasoning_as_content
+                self.full_reply += actual_content
                 if not content_buffered_in_reasoning:
-                    self.buffer += delta.content
+                    self.buffer += actual_content
 
                 if not self.in_code_block and (self._looks_like_start_fragment(self.buffer) or self.buffer.endswith('`')):
                     continue
@@ -467,6 +557,36 @@ class AIStreamParser:
                 name = tc.get("function", {}).get("name", "unknown")
                 args_preview = tc.get("function", {}).get("arguments", "")[:50]
                 self.console.print(f"  [dim]• {name}({args_preview}...)[/dim]", highlight=False)
+
+            # finish_reason이 "tool_calls"이고 content가 없는 경우 안내
+            if finish_reason == "tool_calls" and not self.full_reply.strip():
+                self.console.print(
+                    "[dim]  → 모델이 Tool 실행 결과 대기 중 (최종 응답은 Tool 실행 후 생성됨)[/dim]",
+                    highlight=False
+                )
+
+        # 디버그: finish_reason 항상 표시 (문제 진단용)
+        if finish_reason:
+            self.console.print(f"[dim]  finish_reason: {finish_reason}[/dim]", highlight=False)
+
+        # 응답이 비어있고 tool_calls도 없는 경우 경고 (GPT 문제 진단용)
+        if not self.full_reply.strip() and not tool_calls:
+            self.console.print(
+                f"\n[yellow]⚠️ 경고: 응답 내용이 비어있습니다.[/yellow]",
+                highlight=False
+            )
+            self.console.print(
+                f"[dim]  - reasoning_buffer 길이: {len(self.reasoning_buffer)}[/dim]",
+                highlight=False
+            )
+            self.console.print(
+                f"[dim]  - finish_reason: {finish_reason}[/dim]",
+                highlight=False
+            )
+            self.console.print(
+                f"[dim]  - usage_info: {usage_info}[/dim]",
+                highlight=False
+            )
 
         return self.full_reply, usage_info, tool_calls
 

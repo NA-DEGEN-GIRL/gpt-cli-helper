@@ -137,6 +137,10 @@ class ToolRegistry:
         Returns:
             tool 결과 메시지 목록 (API에 전달할 형식)
             [{"role": "tool", "tool_call_id": "xxx", "content": "result"}, ...]
+
+        Note:
+            Gemini 모델의 경우 thought_signature가 tool_call에 포함될 수 있으며,
+            이를 tool result에 함께 전달해야 합니다.
         """
         results = []
 
@@ -147,11 +151,19 @@ class ToolRegistry:
                 show_result=show_result
             )
 
-            results.append({
+            tool_result_msg = {
                 "role": "tool",
                 "tool_call_id": tool_call_id,
                 "content": result
-            })
+            }
+
+            # Gemini용 thought_signature 보존
+            # tool_call에 thought_signature가 있으면 tool result에도 포함
+            thought_sig = tool_call.get("thought_signature")
+            if thought_sig:
+                tool_result_msg["thought_signature"] = thought_sig
+
+            results.append(tool_result_msg)
 
         return results
 

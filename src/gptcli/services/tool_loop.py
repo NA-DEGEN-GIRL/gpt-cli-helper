@@ -89,6 +89,21 @@ class ToolLoopService:
         """신뢰 수준을 변경합니다."""
         self.registry.set_trust_level(level)
 
+    def _get_tool_calls_signature(self, tool_calls: List[Dict[str, Any]]) -> str:
+        """
+        tool_calls의 시그니처를 생성합니다 (반복 감지용).
+
+        동일한 Tool을 동일한 인자로 호출하면 같은 시그니처가 됩니다.
+        이를 통해 무한 루프(같은 작업 반복)를 감지합니다.
+        """
+        parts = []
+        for tc in tool_calls:
+            func = tc.get("function", {})
+            name = func.get("name", "")
+            args = func.get("arguments", "")
+            parts.append(f"{name}:{args}")
+        return "|".join(sorted(parts))
+
     def get_trust_status(self) -> str:
         """현재 신뢰 상태 문자열을 반환합니다."""
         return self.registry.get_trust_status()
@@ -160,6 +175,7 @@ class ToolLoopService:
 
         # 디버그: 모델의 Tool 지원 상태 출력
         model_short = model.split("/")[-1] if "/" in model else model
+
         if self.enabled:
             force_indicator = " [강제]" if self.force_mode else ""
             if has_support:
@@ -194,6 +210,16 @@ class ToolLoopService:
         # 원본 messages를 수정하지 않고 임시 복사본 사용
         working_messages = list(messages)
 
+        # 반복 감지용: 이전 tool_calls 기록
+        previous_tool_calls_signature = None
+        repeat_count = 0
+        MAX_REPEATS = 2  # 동일 작업 최대 반복 횟수
+
+        # Tool force 모드에서 쓰기 없이 읽기만 반복하는 경우 감지
+        WRITE_TOOLS = {"Write", "Edit", "Bash"}
+        consecutive_read_only = 0
+        MAX_READ_ONLY_ITERATIONS = 5  # 연속 5회 읽기만 하면 경고
+
         while iteration < self.MAX_ITERATIONS:
             iteration += 1
 
@@ -218,11 +244,73 @@ class ToolLoopService:
             if not tool_calls:
                 break
 
+            # 반복 감지: 동일한 tool_calls 패턴인지 확인
+            current_signature = self._get_tool_calls_signature(tool_calls)
+            if current_signature == previous_tool_calls_signature:
+                repeat_count += 1
+                if repeat_count >= MAX_REPEATS:
+                    self.console.print(
+                        f"\n[yellow]⚠️ 동일한 Tool 호출이 {MAX_REPEATS}회 반복됨. 무한 루프 방지를 위해 종료합니다.[/yellow]",
+                        highlight=False
+                    )
+                    # tool_choice를 none으로 설정하여 최종 응답 요청
+                    self.console.print(
+                        "[dim]→ 모델에 최종 응답 요청 중...[/dim]",
+                        highlight=False
+                    )
+                    final_result = self.parser.stream_and_parse(
+                        system_prompt,
+                        working_messages,
+                        model,
+                        pretty_print,
+                        tools=None  # Tool 없이 최종 응답 요청
+                    )
+                    if final_result:
+                        final_response = final_result[0]
+                        final_usage = final_result[1]
+                    break
+            else:
+                repeat_count = 0
+                previous_tool_calls_signature = current_signature
+
+            # Tool force 모드에서 쓰기 Tool 없이 읽기만 반복하는지 체크
+            if self.force_mode:
+                tool_names = [tc.get("function", {}).get("name", "") for tc in tool_calls]
+                has_write_tool = any(name in WRITE_TOOLS for name in tool_names)
+
+                if has_write_tool:
+                    consecutive_read_only = 0  # 쓰기 Tool 사용 시 카운터 리셋
+                else:
+                    consecutive_read_only += 1
+                    if consecutive_read_only >= MAX_READ_ONLY_ITERATIONS:
+                        self.console.print(
+                            f"\n[yellow]⚠️ Tool 강제 모드에서 {MAX_READ_ONLY_ITERATIONS}회 연속 읽기만 수행됨.[/yellow]",
+                            highlight=False
+                        )
+                        self.console.print(
+                            "[dim]→ 모델이 수정을 수행하지 않고 있습니다. 최종 응답 요청 중...[/dim]",
+                            highlight=False
+                        )
+                        # Tool 없이 최종 응답 요청
+                        final_result = self.parser.stream_and_parse(
+                            system_prompt,
+                            working_messages,
+                            model,
+                            pretty_print,
+                            tools=None
+                        )
+                        if final_result:
+                            final_response = final_result[0]
+                            final_usage = final_result[1]
+                        break
+
             # 임시 메시지에 Assistant 메시지 추가 (tool_calls 포함)
+            # Gemini의 경우 tool_calls에 thought_signature가 포함되어 있으며,
+            # 이를 그대로 보존해야 다음 턴에서 오류가 발생하지 않음
             assistant_message = {
                 "role": "assistant",
                 "content": response_text if response_text else None,
-                "tool_calls": tool_calls
+                "tool_calls": tool_calls  # thought_signature는 tool_calls 내부에 이미 포함됨
             }
             working_messages.append(assistant_message)
 
