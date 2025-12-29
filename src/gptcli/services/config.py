@@ -323,12 +323,22 @@ __init__.py
         user_patterns = []
         if self.IGNORE_FILE.exists():
             user_patterns = self.IGNORE_FILE.read_text('utf-8').splitlines()
-        
+
         # 순서를 보존하며 중복을 제거 (dict.fromkeys 트릭)
         combined_patterns = list(dict.fromkeys(default_patterns + user_patterns))
-        
-        final_patterns = [p.strip() for p in combined_patterns if p.strip() and not p.strip().startswith("#")]
-        
+
+        # .gitignore include 기능: 패턴에 ".gitignore"가 있으면 해당 파일 내용을 포함
+        gitignore_patterns = []
+        if ".gitignore" in combined_patterns:
+            gitignore_file = self.BASE_DIR / ".gitignore"
+            if gitignore_file.exists():
+                gitignore_patterns = gitignore_file.read_text('utf-8').splitlines()
+            # .gitignore 항목 자체는 제거 (include 지시자로만 사용)
+            combined_patterns.remove(".gitignore")
+
+        all_patterns = combined_patterns + gitignore_patterns
+        final_patterns = [p.strip() for p in all_patterns if p.strip() and not p.strip().startswith("#")]
+
         return PathSpec.from_lines("gitwildmatch", final_patterns) if final_patterns else None
 
     def is_ignored(self, path: Path, spec: Optional[PathSpec]) -> bool:

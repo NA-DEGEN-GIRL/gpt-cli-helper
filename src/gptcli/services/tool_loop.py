@@ -35,7 +35,7 @@ class ToolLoopService:
     """
 
     # 최대 루프 반복 횟수 (무한 루프 방지)
-    MAX_ITERATIONS: int = 20
+    MAX_ITERATIONS: int = 50
 
     def __init__(
         self,
