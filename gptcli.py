@@ -519,7 +519,9 @@ class GPTCLI:
         self.console.print("\n[bold cyan]세션이 저장되었습니다. 안녕히 가세요![/bold cyan]")
 
 def main() -> None:
-    load_dotenv()
+    # 스크립트 위치 기준으로 .env 로드 (어디서 실행해도 동작)
+    script_dir = Path(__file__).parent.resolve()
+    load_dotenv(script_dir / ".env")
     try:
         cfg = ConfigManager()
         chosen_session = cfg.load_current_session_name() or "default"

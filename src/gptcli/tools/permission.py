@@ -15,12 +15,17 @@ import difflib
 import re
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 from rich.columns import Columns
+
+# Pygments for syntax highlighting
+from pygments import lex as pyg_lex
+from pygments.lexers import guess_lexer_for_filename, TextLexer
+from pygments.token import Token
 
 
 class TrustLevel(Enum):
@@ -189,8 +194,8 @@ class PermissionManager:
             lineterm=""
         ))
 
-        # diff 결과를 Rich Text로 렌더링
-        diff_text = self._render_diff_text(diff_lines, max_lines=40)
+        # diff 결과를 Rich Text로 렌더링 (syntax highlighting 포함)
+        diff_text = self._render_diff_text(diff_lines, max_lines=40, file_path=file_path)
 
         panel = Panel(
             diff_text,
@@ -200,19 +205,27 @@ class PermissionManager:
         )
         self.console.print(panel)
 
-    def _render_diff_text(self, diff_lines: List[str], max_lines: int = 40) -> Text:
+    def _render_diff_text(
+        self,
+        diff_lines: List[str],
+        max_lines: int = 40,
+        file_path: str = ""
+    ) -> Text:
         """
-        Diff 라인들을 Rich Text로 변환합니다.
+        Diff 라인들을 Rich Text로 변환합니다 (Syntax Highlighting 포함).
 
         - '---', '+++' 헤더: 파일명 스타일
         - '@@' 헝크 헤더: cyan
-        - '-' 삭제 라인: 빨간 배경
-        - '+' 추가 라인: 초록 배경
-        - ' ' 컨텍스트 라인: 기본색
+        - '-' 삭제 라인: 빨간 배경 + syntax highlighting
+        - '+' 추가 라인: 초록 배경 + syntax highlighting
+        - ' ' 컨텍스트 라인: 기본색 + syntax highlighting
         """
         result = Text()
         line_count = 0
         total_lines = len(diff_lines)
+
+        # 언어 추론 및 렉서 획득
+        lexer = self._get_lexer_for_file(file_path)
 
         for i, line in enumerate(diff_lines):
             if line_count >= max_lines and i < total_lines - 3:
@@ -222,17 +235,57 @@ class PermissionManager:
                     result.append(f"\n    ... ⋮ {omitted}줄 생략 ⋮ ...\n", style="dim italic")
                     # 마지막 3줄로 점프
                     for last_line in diff_lines[-3:]:
-                        self._append_diff_line(result, last_line)
+                        self._append_diff_line_highlighted(result, last_line, lexer)
                     break
 
-            self._append_diff_line(result, line)
+            self._append_diff_line_highlighted(result, line, lexer)
             line_count += 1
 
         return result
 
-    def _append_diff_line(self, text: Text, line: str) -> None:
-        """개별 diff 라인을 Text 객체에 추가합니다."""
-        # 줄 끝 개행 제거 후 처리, 마지막에 개행 추가
+    def _get_lexer_for_file(self, file_path: str):
+        """파일 경로에서 적절한 Pygments 렉서를 반환합니다."""
+        if not file_path:
+            return TextLexer()
+        try:
+            return guess_lexer_for_filename(file_path, "")
+        except Exception:
+            return TextLexer()
+
+    # Pygments 토큰 → Rich 색상 매핑 (monokai 테마 기반)
+    _TOKEN_COLORS: Dict[str, str] = {
+        "Keyword": "#f92672",          # 분홍
+        "Name.Function": "#a6e22e",    # 연두
+        "Name.Class": "#a6e22e",       # 연두
+        "Name.Decorator": "#a6e22e",   # 연두
+        "Name.Builtin": "#66d9ef",     # 하늘
+        "String": "#e6db74",           # 노랑
+        "Number": "#ae81ff",           # 보라
+        "Comment": "#75715e",          # 회색
+        "Operator": "#f92672",         # 분홍
+        "Punctuation": "#f8f8f2",      # 흰색
+        "Name": "#f8f8f2",             # 흰색
+        "Text": "#f8f8f2",             # 흰색
+    }
+
+    def _get_token_color(self, ttype) -> str:
+        """Pygments 토큰 타입에서 색상을 찾습니다."""
+        # 토큰 계층 탐색 (Token.Keyword.Constant → Keyword.Constant → Keyword)
+        ttype_str = str(ttype)
+        if ttype_str.startswith("Token."):
+            ttype_str = ttype_str[6:]  # "Token." 제거
+
+        parts = ttype_str.split(".")
+        while parts:
+            key = ".".join(parts)
+            if key in self._TOKEN_COLORS:
+                return self._TOKEN_COLORS[key]
+            parts.pop()
+
+        return "#f8f8f2"  # 기본 흰색
+
+    def _append_diff_line_highlighted(self, text: Text, line: str, lexer) -> None:
+        """개별 diff 라인을 syntax highlighting과 함께 Text 객체에 추가합니다."""
         line = line.rstrip('\n')
 
         if line.startswith('---'):
@@ -242,14 +295,53 @@ class PermissionManager:
         elif line.startswith('@@'):
             text.append(line + "\n", style="bold cyan")
         elif line.startswith('-'):
-            # 삭제 라인: 빨간 배경
-            text.append(line + "\n", style="white on #5f0000")
+            # 삭제 라인: 빨간 배경 + syntax highlighting
+            self._append_code_with_bg(text, "-", line[1:], "#5f0000", lexer)
         elif line.startswith('+'):
-            # 추가 라인: 초록 배경
-            text.append(line + "\n", style="white on #005f00")
+            # 추가 라인: 초록 배경 + syntax highlighting
+            self._append_code_with_bg(text, "+", line[1:], "#005f00", lexer)
         else:
-            # 컨텍스트 라인 (공백으로 시작)
-            text.append(line + "\n", style="dim")
+            # 컨텍스트 라인
+            code = line[1:] if line.startswith(' ') else line
+            self._append_code_with_bg(text, " ", code, "#1e1e1e", lexer, dim=True)
+
+    def _append_code_with_bg(
+        self,
+        text: Text,
+        prefix: str,
+        code: str,
+        bg_color: str,
+        lexer,
+        dim: bool = False
+    ) -> None:
+        """코드를 syntax highlighting과 배경색과 함께 추가합니다."""
+        # prefix (-, +, 공백)
+        prefix_style = f"bold on {bg_color}" if prefix != " " else f"dim on {bg_color}"
+        text.append(prefix, style=prefix_style)
+
+        if not code:
+            text.append("\n", style=f"on {bg_color}")
+            return
+
+        # 코드 토큰화 및 렌더링
+        try:
+            tokens = list(pyg_lex(code, lexer))
+            for ttype, value in tokens:
+                if not value or value == '\n':
+                    continue
+                fg_color = self._get_token_color(ttype)
+                style = f"{fg_color} on {bg_color}"
+                if dim:
+                    style = f"dim {fg_color} on {bg_color}"
+                text.append(value, style=style)
+        except Exception:
+            # 렉싱 실패 시 기본 스타일
+            style = f"on {bg_color}"
+            if dim:
+                style = f"dim on {bg_color}"
+            text.append(code, style=style)
+
+        text.append("\n", style=f"on {bg_color}")
 
     def _find_line_number(self, file_path: str, search_str: str) -> int:
         """파일에서 문자열의 시작 줄 번호를 찾습니다."""
