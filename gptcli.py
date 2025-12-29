@@ -252,6 +252,30 @@ class GPTCLI:
         def _(event):
             event.current_buffer.select_all()
 
+        # 위 화살표: 멀티라인 텍스트 내에서는 커서 이동, 첫 줄이면 히스토리
+        @bindings.add("up")
+        def _(event):
+            buf = event.current_buffer
+            doc = buf.document
+            # 커서가 첫 줄이 아니면 텍스트 내 위로 이동
+            if doc.cursor_position_row > 0:
+                buf.cursor_up()
+            else:
+                # 첫 줄이면 히스토리 이전
+                buf.history_backward()
+
+        # 아래 화살표: 멀티라인 텍스트 내에서는 커서 이동, 마지막 줄이면 히스토리
+        @bindings.add("down")
+        def _(event):
+            buf = event.current_buffer
+            doc = buf.document
+            # 커서가 마지막 줄이 아니면 텍스트 내 아래로 이동
+            if doc.cursor_position_row < doc.line_count - 1:
+                buf.cursor_down()
+            else:
+                # 마지막 줄이면 히스토리 다음
+                buf.history_forward()
+
         @bindings.add("_", filter=is_not_slash)
         def _(event):
             buf = event.current_buffer
