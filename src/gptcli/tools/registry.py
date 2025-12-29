@@ -219,15 +219,25 @@ class ToolRegistry:
 
     def _display_tool_result(self, tool_name: str, success: bool, result: str) -> None:
         """Tool 실행 결과를 표시합니다."""
+        # Read 도구는 더 짧게 표시 (파일 내용은 AI에게만 전달되면 됨)
+        max_display = 300 if tool_name == "Read" else 800
+
         # 결과가 짧으면 직접 출력, 길면 패널로
-        if len(result) < 500:
+        if len(result) < 200:
             style = "green" if success else "red"
             self.console.print(f"[{style}]{result}[/{style}]", highlight=False)
         else:
             title_style = "green" if success else "red"
-            title = f"[{title_style}]{tool_name} 결과[/{title_style}]"
-            # 긴 결과는 처음 2000자만 표시
-            display_result = result[:2000] + "..." if len(result) > 2000 else result
+            # 전체 길이 정보 포함
+            total_chars = len(result)
+            total_lines = result.count('\n') + 1
+            title = f"[{title_style}]{tool_name} 결과[/{title_style}] [dim]({total_lines}줄, {total_chars:,}자)[/dim]"
+
+            # 제한된 길이만 표시
+            if len(result) > max_display:
+                display_result = result[:max_display] + f"\n... ({total_chars - max_display:,}자 생략)"
+            else:
+                display_result = result
             self.console.print(
                 Panel(display_result, title=title, border_style="dim"),
                 highlight=False

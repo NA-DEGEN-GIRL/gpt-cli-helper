@@ -17,6 +17,7 @@ from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.completion import PathCompleter, WordCompleter, FuzzyCompleter
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.application.current import get_app
 from rich.console import Console
@@ -54,6 +55,8 @@ class GPTCLI:
         self.theme_manager = ThemeManager(default_theme='monokai-ish')
         self.console = Console(theme=self.theme_manager.get_rich_theme())
         self._next_prompt_default: Optional[str] = None
+        self._pasted_text_counter: int = 0  # 긴 텍스트 붙여넣기 카운터
+        self._pasted_content: Optional[str] = None  # 압축 표시된 원본 텍스트 저장
         
         self.client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
@@ -262,6 +265,41 @@ class GPTCLI:
                 except Exception:
                     pass
 
+        # Bracketed Paste: 긴 텍스트 붙여넣기 감지 및 압축 표시
+        PASTE_LINE_THRESHOLD = 10
+        gptcli_instance = self  # 클로저에서 self 참조
+
+        @bindings.add(Keys.BracketedPaste)
+        def _(event):
+            data = event.data  # 붙여넣기된 텍스트
+
+            # 다양한 줄바꿈 문자 처리 (\r\n, \r, \n)
+            normalized = data.replace('\r\n', '\n').replace('\r', '\n')
+            lines = normalized.split('\n')
+            line_count = len(lines)
+
+            if line_count >= PASTE_LINE_THRESHOLD:
+                # 원본 저장
+                gptcli_instance._pasted_text_counter += 1
+                gptcli_instance._pasted_content = data
+
+                # 압축 표시 문자열 생성 (빈 줄이 아닌 첫 내용 찾기)
+                first_content = ""
+                for line in lines:
+                    stripped = line.strip()
+                    if stripped:
+                        first_content = stripped[:50] + "..." if len(stripped) > 50 else stripped
+                        break
+
+                collapsed = f"[Pasted text #{gptcli_instance._pasted_text_counter} +{line_count} lines: {first_content}]"
+
+                # 기존 버퍼 내용 + 압축 문자열
+                event.current_buffer.insert_text(collapsed)
+            else:
+                # 짧은 텍스트는 그냥 삽입
+                gptcli_instance._pasted_content = None
+                event.current_buffer.insert_text(data)
+
         return PromptSession(
             history=FileHistory(self.config.PROMPT_HISTORY_FILE),
             #auto_suggest=AutoSuggestFromHistory(),
@@ -281,6 +319,44 @@ class GPTCLI:
         self.model_context = data.get("context_length", self.default_context_length)
         self.usage_history = data.get("usage_history", [])
         self.mode = data.get("mode", self.mode or "dev")
+
+    def _display_collapsed_input(self, text: str, line_threshold: int = 10) -> bool:
+        """
+        긴 텍스트 입력을 압축된 형태로 표시합니다.
+
+        Args:
+            text: 사용자 입력 텍스트
+            line_threshold: 압축 표시 임계값 (기본 10줄)
+
+        Returns:
+            True if collapsed display was shown, False otherwise
+        """
+        lines = text.split('\n')
+        line_count = len(lines)
+
+        if line_count < line_threshold:
+            return False
+
+        self._pasted_text_counter += 1
+
+        # 첫 3줄 미리보기
+        preview_lines = lines[:3]
+        preview = '\n'.join(preview_lines)
+        if len(preview) > 150:
+            preview = preview[:150] + "..."
+
+        # 압축된 형태로 표시
+        collapsed_header = f"[dim]├─ Pasted text #{self._pasted_text_counter} [cyan]+{line_count} lines[/cyan][/dim]"
+        self.console.print(collapsed_header)
+
+        # 미리보기를 들여쓰기하여 표시
+        for line in preview_lines[:2]:
+            display_line = line[:80] + "..." if len(line) > 80 else line
+            self.console.print(f"[dim]│  {display_line}[/dim]")
+        self.console.print(f"[dim]│  ...[/dim]")
+        self.console.print(f"[dim]└─[/dim]")
+
+        return True
 
     def _prepare_user_message(self, user_input: str) -> Dict[str, Any]:
         """첨부 파일을 포함하여 API에 보낼 사용자 메시지 객체를 생성합니다."""
@@ -495,7 +571,30 @@ class GPTCLI:
                     if should_exit:
                         break
                 else:
-                    self._handle_chat_message(user_input)
+                    # 압축 표시된 붙여넣기가 있으면 원본 사용
+                    if self._pasted_content:
+                        actual_input = self._pasted_content
+                        # 전송 시 원본 정보 + 미리보기 표시
+                        normalized = actual_input.replace('\r\n', '\n').replace('\r', '\n')
+                        lines = normalized.split('\n')
+                        line_count = len(lines)
+                        char_count = len(actual_input)
+
+                        # 빈 줄이 아닌 첫 3줄 미리보기
+                        preview_lines = [l.strip() for l in lines if l.strip()][:3]
+                        self.console.print(f"[dim]📤 전송: {line_count}줄, {char_count:,}자[/dim]")
+                        self.console.print("[dim]┌─────────────────────────────────────[/dim]")
+                        for pl in preview_lines:
+                            display = pl[:60] + "..." if len(pl) > 60 else pl
+                            self.console.print(f"[dim]│ {display}[/dim]")
+                        if len(preview_lines) < len([l for l in lines if l.strip()]):
+                            self.console.print("[dim]│ ...[/dim]")
+                        self.console.print("[dim]└─────────────────────────────────────[/dim]")
+
+                        self._pasted_content = None
+                    else:
+                        actual_input = user_input
+                    self._handle_chat_message(actual_input)
 
             except (KeyboardInterrupt, EOFError):
                 break
